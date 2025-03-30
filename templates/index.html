@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>Video Object Tracking System</title>
+    <style>
+      body { margin: 0; font-family: Arial, sans-serif; background: #f4f4f4; text-align: center; }
+      h1 { background: #333; color: #fff; padding: 15px; }
+      .video-container { margin: 20px auto; display: inline-block; background: #000; max-width: 800px; width: 100%; position: relative; }
+      img { width: 100%; height: auto; }
+      .footer { margin-top: 20px; font-size: 0.9em; color: #555; }
+      .controls { margin: 20px auto; max-width: 800px; padding: 20px; background: #fff; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+      .btn { background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; font-size: 1em; }
+      .btn:hover { background: #2980b9; }
+      .btn.active { background: #27ae60; }
+      .btn.disabled { background: #e74c3c; }
+      .btn.danger { background: #e74c3c; }
+      .btn.danger:hover { background: #c0392b; }
+      .upload-form { margin: 20px 0; padding: 15px; border: 1px dashed #ccc; border-radius: 5px; }
+      .mode-controls { margin-top: 20px; display: flex; flex-wrap: wrap; justify-content: space-between; }
+      .mode-panel { flex: 1; min-width: 200px; margin: 0 10px; }
+      .file-input { padding: 10px; margin-bottom: 10px; width: 80%; }
+      #upload-status { margin-top: 10px; font-weight: bold; }
+      .info-panel { text-align: left; padding: 10px; background: #f9f9f9; border-radius: 5px; margin-top: 15px; }
+      .info-panel h3 { margin-top: 0; color: #333; }
+      .feature-list { list-style-type: disc; padding-left: 25px; }
+      .help-text { color: #666; font-size: 0.9em; font-style: italic; }
+      .object-selection { margin-top: 15px; }
+      #object-id-input { padding: 10px; width: 80px; margin-right: 10px; }
+      .selection-controls { margin-top: 15px; }
+      .selection-status { margin-top: 10px; font-weight: bold; color: #3498db; }
+      .admin-panel { margin-top: 25px; border-top: 1px solid #eee; padding-top: 15px; }
+    </style>
+  </head>
+  <body>
+    <h1>Video Object Tracking System</h1>
+    
+    <div class="controls">
+      <h2>Upload Video for Analysis</h2>
+      
+      <div class="upload-form">
+        <form id="video-upload-form" enctype="multipart/form-data">
+          <input type="file" id="video-file" name="video" accept="video/*" class="file-input">
+          <div>
+            <button type="submit" class="btn">Upload & Process Video</button>
+          </div>
+        </form>
+        <div id="upload-status"></div>
+      </div>
+      
+      <div class="mode-controls">
+        <div class="mode-panel">
+          <h3>Tracking Mode</h3>
+          <button id="tracking-toggle" class="btn active">Tracking: ON</button>
+          <div class="help-text">
+            Toggle tracking on/off. If you experience errors with your video, try turning tracking off.
+          </div>
+        </div>
+        
+        <div class="mode-panel">
+          <h3>Selective Tracking</h3>
+          <div class="object-selection">
+            <input type="number" id="object-id-input" min="0" placeholder="Object ID">
+            <button id="select-object-btn" class="btn">Track This Object</button>
+          </div>
+          <button id="clear-selection-btn" class="btn disabled">Clear Selection</button>
+          <div class="help-text">
+            Enter an object ID to track only that specific object. Look for the ID number displayed above each detected object.
+          </div>
+          <div id="selection-status" class="selection-status"></div>
+        </div>
+      </div>
+      
+      <div class="info-panel">
+        <h3>Features</h3>
+        <ul class="feature-list">
+          <li>Object detection and tracking</li>
+          <li>Direction and speed analysis</li>
+          <li>3D movement prediction (toward/away from camera)</li>
+          <li>Selective object tracking</li>
+          <li>Standardized video processing (640x480)</li>
+        </ul>
+      </div>
+      
+      <div class="admin-panel">
+        <button id="shutdown-btn" class="btn danger">Shutdown Server</button>
+        <div class="help-text">
+          This will shut down the application server and clean up all uploaded videos.
+        </div>
+      </div>
+    </div>
+    
+    <div class="video-container">
+      <img id="video-feed" src="/static/placeholder.jpg" alt="Upload a video to begin analysis" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'640\' height=\'480\' viewBox=\'0 0 640 480\'%3E%3Crect width=\'640\' height=\'480\' fill=\'%23f0f0f0\'/%3E%3Ctext x=\'320\' y=\'240\' text-anchor=\'middle\' dominant-baseline=\'middle\' font-family=\'Arial\' font-size=\'20\' fill=\'%23666\'%3EUpload a video to begin analysis%3C/text%3E%3C/svg%3E'">
+    </div>
+    
+    <div class="footer">
+      <p>Powered by YOLO & OpenCV</p>
+    </div>
+    
+    <script>
+      // Current state
+      let currentFilename = null;
+      let trackingEnabled = true;
+      let selectedObjectId = null;
+      
+      // Update video feed source
+      function updateVideoSource() {
+        if (!currentFilename) {
+          return; // No video uploaded yet
+        }
+        
+        const params = new URLSearchParams();
+        params.append("filename", currentFilename);
+        params.append("tracking", trackingEnabled);
+        
+        // Add object ID if selective tracking is enabled
+        if (selectedObjectId !== null) {
+          params.append("object_id", selectedObjectId);
+        }
+        
+        document.getElementById('video-feed').src = `/video_feed?${params.toString()}`;
+      }
+      
+      // Toggle tracking mode
+      document.getElementById('tracking-toggle').addEventListener('click', function() {
+        trackingEnabled = !trackingEnabled;
+        const btn = document.getElementById('tracking-toggle');
+        
+        if (trackingEnabled) {
+          btn.textContent = "Tracking: ON";
+          btn.classList.add('active');
+          btn.classList.remove('disabled');
+        } else {
+          btn.textContent = "Tracking: OFF";
+          btn.classList.remove('active');
+          btn.classList.add('disabled');
+        }
+        
+        updateVideoSource();
+      });
+      
+      // Select specific object to track
+      document.getElementById('select-object-btn').addEventListener('click', function() {
+        const objectIdInput = document.getElementById('object-id-input');
+        const clearBtn = document.getElementById('clear-selection-btn');
+        const statusEl = document.getElementById('selection-status');
+        
+        if (!objectIdInput.value) {
+          statusEl.textContent = "Please enter an Object ID";
+          statusEl.style.color = "#e74c3c";
+          return;
+        }
+        
+        const objectId = parseInt(objectIdInput.value);
+        
+        // Send selection to server
+        fetch('/select_object', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: `object_id=${objectId}`
+        })
+        .then(response => response.json())
+        .then(data => {
+          if (data.success) {
+            selectedObjectId = objectId;
+            statusEl.textContent = `Tracking Object ID: ${objectId}`;
+            statusEl.style.color = "#27ae60";
+            clearBtn.classList.remove('disabled');
+            
+            // Update the video feed
+            updateVideoSource();
+          }
+        })
+        .catch(error => {
+          statusEl.textContent = "Error selecting object";
+          statusEl.style.color = "#e74c3c";
+        });
+      });
+      
+      // Clear object selection
+      document.getElementById('clear-selection-btn').addEventListener('click', function() {
+        const statusEl = document.getElementById('selection-status');
+        const clearBtn = document.getElementById('clear-selection-btn');
+        
+        // Send clear request to server
+        fetch('/clear_selection', {
+          method: 'POST'
+        })
+        .then(response => response.json())
+        .then(data => {
+          if (data.success) {
+            selectedObjectId = null;
+            statusEl.textContent = "Tracking all objects";
+            statusEl.style.color = "#3498db";
+            clearBtn.classList.add('disabled');
+            document.getElementById('object-id-input').value = '';
+            
+            // Update the video feed
+            updateVideoSource();
+          }
+        })
+        .catch(error => {
+          statusEl.textContent = "Error clearing selection";
+          statusEl.style.color = "#e74c3c";
+        });
+      });
+      
+      // Handle video upload
+      document.getElementById('video-upload-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData();
+        const fileInput = document.getElementById('video-file');
+        
+        if (fileInput.files.length === 0) {
+          document.getElementById('upload-status').textContent = 'Please select a video file';
+          document.getElementById('upload-status').style.color = '#e74c3c';
+          return;
+        }
+        
+        formData.append('video', fileInput.files[0]);
+        
+        document.getElementById('upload-status').textContent = 'Uploading...';
+        document.getElementById('upload-status').style.color = '#3498db';
+        
+        fetch('/upload_video', {
+          method: 'POST',
+          body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+          if (data.success) {
+            document.getElementById('upload-status').textContent = 'Upload successful! Processing video...';
+            document.getElementById('upload-status').style.color = '#27ae60';
+            currentFilename = data.filename;
+            
+            // Reset selective tracking when loading a new video
+            selectedObjectId = null;
+            document.getElementById('selection-status').textContent = '';
+            document.getElementById('object-id-input').value = '';
+            document.getElementById('clear-selection-btn').classList.add('disabled');
+            
+            updateVideoSource();
+          } else {
+            document.getElementById('upload-status').textContent = 'Upload failed: ' + data.error;
+            document.getElementById('upload-status').style.color = '#e74c3c';
+          }
+        })
+        .catch(error => {
+          document.getElementById('upload-status').textContent = 'Error: ' + error;
+          document.getElementById('upload-status').style.color = '#e74c3c';
+        });
+      });
+      
+      // Shutdown server functionality
+      document.getElementById('shutdown-btn').addEventListener('click', function() {
+        if (confirm('Are you sure you want to shut down the server? All uploaded videos will be deleted.')) {
+          fetch('/shutdown')
+            .then(response => response.json())
+            .then(data => {
+              alert('Server shutting down...');
+              // Disable all interactive elements
+              const buttons = document.querySelectorAll('.btn');
+              buttons.forEach(btn => {
+                btn.disabled = true;
+                btn.classList.add('disabled');
+              });
+              document.getElementById('video-file').disabled = true;
+              document.getElementById('object-id-input').disabled = true;
+            })
+            .catch(error => {
+              console.error('Error shutting down server:', error);
+            });
+        }
+      });
+    </script>
+  </body>
+</html>
