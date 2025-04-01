@@ -1,281 +1,917 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8">
-    <title>Video Object Tracking System</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Real-time Object Tracking</title>
     <style>
-      body { margin: 0; font-family: Arial, sans-serif; background: #f4f4f4; text-align: center; }
-      h1 { background: #333; color: #fff; padding: 15px; }
-      .video-container { margin: 20px auto; display: inline-block; background: #000; max-width: 800px; width: 100%; position: relative; }
-      img { width: 100%; height: auto; }
-      .footer { margin-top: 20px; font-size: 0.9em; color: #555; }
-      .controls { margin: 20px auto; max-width: 800px; padding: 20px; background: #fff; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-      .btn { background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; font-size: 1em; }
-      .btn:hover { background: #2980b9; }
-      .btn.active { background: #27ae60; }
-      .btn.disabled { background: #e74c3c; }
-      .btn.danger { background: #e74c3c; }
-      .btn.danger:hover { background: #c0392b; }
-      .upload-form { margin: 20px 0; padding: 15px; border: 1px dashed #ccc; border-radius: 5px; }
-      .mode-controls { margin-top: 20px; display: flex; flex-wrap: wrap; justify-content: space-between; }
-      .mode-panel { flex: 1; min-width: 200px; margin: 0 10px; }
-      .file-input { padding: 10px; margin-bottom: 10px; width: 80%; }
-      #upload-status { margin-top: 10px; font-weight: bold; }
-      .info-panel { text-align: left; padding: 10px; background: #f9f9f9; border-radius: 5px; margin-top: 15px; }
-      .info-panel h3 { margin-top: 0; color: #333; }
-      .feature-list { list-style-type: disc; padding-left: 25px; }
-      .help-text { color: #666; font-size: 0.9em; font-style: italic; }
-      .object-selection { margin-top: 15px; }
-      #object-id-input { padding: 10px; width: 80px; margin-right: 10px; }
-      .selection-controls { margin-top: 15px; }
-      .selection-status { margin-top: 10px; font-weight: bold; color: #3498db; }
-      .admin-panel { margin-top: 25px; border-top: 1px solid #eee; padding-top: 15px; }
+        :root {
+            --military-dark: #1a1f1c;
+            --military-green: #4b5320;
+            --accent-green: #87a330;
+            --gunmetal: #2a3439;
+            --light-gray: #c4c8c5;
+            --tactical-red: #a33030;
+            --border-radius: 6px;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: 'Roboto', sans-serif;
+            background: var(--military-dark);
+            color: var(--light-gray);
+            min-height: 100vh;
+            background-image: 
+                linear-gradient(45deg, rgba(43, 48, 43, 0.1) 25%, transparent 25%),
+                linear-gradient(-45deg, rgba(43, 48, 43, 0.1) 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, rgba(43, 48, 43, 0.1) 75%),
+                linear-gradient(-45deg, transparent 75%, rgba(43, 48, 43, 0.1) 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+        }
+
+        .container {
+            display: flex;
+            gap: 20px;
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+
+        .config-panel {
+            width: 300px;
+            background: var(--gunmetal);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .section {
+            margin-bottom: 25px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: var(--border-radius);
+            padding: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .section-title {
+            color: var(--accent-green);
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 2px solid var(--military-green);
+            padding-bottom: 8px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--light-gray);
+        }
+
+        .form-group input[type="file"] {
+            width: 100%;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--military-green);
+            border-radius: var(--border-radius);
+            color: var(--light-gray);
+            margin-bottom: 10px;
+        }
+
+        button {
+            background: var(--military-green);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            width: 100%;
+        }
+
+        button:hover {
+            background: var(--accent-green);
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        button.danger {
+            background: var(--tactical-red);
+        }
+
+        button.danger:hover {
+            background: #bf3a3a;
+        }
+
+        .help-text {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.6);
+            margin-top: 8px;
+        }
+
+        .status {
+            font-size: 14px;
+            color: var(--light-gray);
+            margin-top: 10px;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: var(--border-radius);
+        }
+
+        .video-container {
+            flex: 1;
+            background: var(--gunmetal);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .video-section {
+            background: var(--military-dark);
+            border-radius: var(--border-radius);
+            overflow: hidden;
+            position: relative;
+            aspect-ratio: 16/9;
+            border: 1px solid var(--military-green);
+        }
+
+        #videoFeed {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            display: block;
+        }
+
+        #videoFeed.active {
+            opacity: 1;
+        }
+
+        #drawCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            cursor: crosshair;
+            display: none;
+            z-index: 3;
+        }
+
+        .drawing-active #drawCanvas {
+            display: block !important;
+        }
+
+        .drawing-controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 4;
+            display: flex;
+            gap: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px;
+            border-radius: var(--border-radius);
+            border: 1px solid var(--military-green);
+            opacity: 0;
+            pointer-events: none;
+            transition: all 0.3s ease;
+        }
+
+        .drawing-active .drawing-controls {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .drawing-btn {
+            background: var(--military-green);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+            min-width: 120px;
+            display: none;
+            opacity: 0;
+            transform: translateY(10px);
+        }
+
+        /* Fix for config panel buttons */
+        .section .drawing-btn {
+            display: block;
+            opacity: 1;
+            transform: none;
+        }
+
+        .drawing-active .drawing-btn {
+            display: block;
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .drawing-btn:hover {
+            background: var(--accent-green);
+            transform: translateY(-2px);
+        }
+
+        .drawing-btn.active {
+            background: var(--accent-green);
+            box-shadow: 0 0 10px rgba(135, 163, 48, 0.3);
+        }
+
+        .drawing-btn.secondary {
+            background: var(--gunmetal);
+        }
+
+        .drawing-btn.secondary:hover {
+            background: var(--military-green);
+        }
+
+        #confirmDrawBtn {
+            background: var(--military-green);
+            transition: all 0.3s ease;
+        }
+
+        #confirmDrawBtn.active {
+            background: #28a745;
+            box-shadow: 0 0 10px rgba(40, 167, 69, 0.3);
+        }
+
+        .playback-controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 4;
+            display: flex;
+            gap: 15px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: var(--border-radius);
+            border: 1px solid var(--military-green);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .control-btn {
+            background: var(--military-green);
+            border: none;
+            color: white;
+            width: 45px;
+            height: 45px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            padding: 0;
+        }
+
+        .control-btn:hover {
+            background: var(--accent-green);
+            transform: scale(1.1);
+        }
+
+        .control-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .control-btn svg {
+            width: 28px;
+            height: 28px;
+            fill: currentColor;
+            stroke: currentColor;
+            stroke-width: 1;
+        }
+
+        .placeholder-content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: var(--light-gray);
+        }
+
+        .placeholder-logo {
+            width: 100px;
+            height: 100px;
+            background: var(--military-green);
+            margin: 0 auto 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            color: white;
+            border: 3px solid var(--accent-green);
+            box-shadow: 0 0 20px rgba(135, 163, 48, 0.2);
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+
+        .drawing-active .drawing-btn.active {
+            animation: pulse 2s infinite;
+        }
+
+        .logo-section {
+            text-align: center;
+            margin: -20px -20px 20px -20px;
+            padding: 15px 20px;
+            background: linear-gradient(135deg, var(--military-dark) 0%, var(--gunmetal) 100%);
+            border-bottom: 2px solid var(--military-green);
+            position: relative;
+            overflow: hidden;
+            border-radius: var(--border-radius) var(--border-radius) 0 0;
+        }
+
+        .logo-section img {
+            max-width: 120px;
+            height: auto;
+            margin-bottom: 10px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .logo-section h1 {
+            font-size: 1.2em;
+            color: var(--accent-green);
+            margin: 5px 0;
+            position: relative;
+            z-index: 1;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .logo-section p {
+            font-size: 0.8em;
+            color: var(--light-gray);
+            margin: 3px 0;
+            position: relative;
+            z-index: 1;
+            opacity: 0.8;
+        }
+
+        .logo-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image: 
+                linear-gradient(45deg, rgba(43, 48, 43, 0.1) 25%, transparent 25%),
+                linear-gradient(-45deg, rgba(43, 48, 43, 0.1) 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, rgba(43, 48, 43, 0.1) 75%),
+                linear-gradient(-45deg, transparent 75%, rgba(43, 48, 43, 0.1) 75%);
+            background-size: 15px 15px;
+            background-position: 0 0, 0 7px, 7px -7px, -7px 0px;
+            opacity: 0.5;
+            z-index: 0;
+        }
     </style>
   </head>
   <body>
-    <h1>Video Object Tracking System</h1>
-    
-    <div class="controls">
-      <h2>Upload Video for Analysis</h2>
-      
-      <div class="upload-form">
-        <form id="video-upload-form" enctype="multipart/form-data">
-          <input type="file" id="video-file" name="video" accept="video/*" class="file-input">
-          <div>
-            <button type="submit" class="btn">Upload & Process Video</button>
-          </div>
-        </form>
-        <div id="upload-status"></div>
-      </div>
-      
-      <div class="mode-controls">
-        <div class="mode-panel">
-          <h3>Tracking Mode</h3>
-          <button id="tracking-toggle" class="btn active">Tracking: ON</button>
-          <div class="help-text">
-            Toggle tracking on/off. If you experience errors with your video, try turning tracking off.
-          </div>
+    <div class="container">
+        <!-- Left Configuration Panel -->
+        <div class="config-panel">
+            <!-- Logo Section -->
+            <div class="logo-section">
+                <img src="/static/images/logo.png" alt="System Logo">
+                <h1> Real-time Object Tracking</h1>
+                <p>Advanced AI-Powered Detection System</p>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Video Upload</div>
+                <div class="form-group">
+                    <label for="videoInput">Select Video File:</label>
+                    <input type="file" id="videoInput" accept="video/*">
+                    <button onclick="uploadVideo()">Upload Video</button>
+                    <div id="uploadStatus" class="status"></div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3 class="section-title">Drawing Controls</h3>
+                <button id="drawModeBtn" style="display: block; background: var(--military-green); color: white; text-transform: uppercase;" onclick="toggleDrawingMode()">Enable Drawing Mode</button>
+                <button onclick="clearSelection()" style="display: block; margin-top: 10px; background: var(--gunmetal); color: white; text-transform: uppercase;">Clear Selection</button>
+                <div class="help-text">Draw a box around the object you want to track</div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Server Controls</div>
+                <div class="form-group">
+                    <button class="danger" onclick="shutdownServer()">Shutdown Server</button>
+                    <div class="help-text">Safely stop the server and clean up resources</div>
+                </div>
+            </div>
         </div>
-        
-        <div class="mode-panel">
-          <h3>Selective Tracking</h3>
-          <div class="object-selection">
-            <input type="number" id="object-id-input" min="0" placeholder="Object ID">
-            <button id="select-object-btn" class="btn">Track This Object</button>
-          </div>
-          <button id="clear-selection-btn" class="btn disabled">Clear Selection</button>
-          <div class="help-text">
-            Enter an object ID to track only that specific object. Look for the ID number displayed above each detected object.
-          </div>
-          <div id="selection-status" class="selection-status"></div>
-        </div>
-      </div>
-      
-      <div class="info-panel">
-        <h3>Features</h3>
-        <ul class="feature-list">
-          <li>Object detection and tracking</li>
-          <li>Direction and speed analysis</li>
-          <li>3D movement prediction (toward/away from camera)</li>
-          <li>Selective object tracking</li>
-          <li>Standardized video processing (640x480)</li>
-        </ul>
-      </div>
-      
-      <div class="admin-panel">
-        <button id="shutdown-btn" class="btn danger">Shutdown Server</button>
-        <div class="help-text">
-          This will shut down the application server and clean up all uploaded videos.
-        </div>
-      </div>
-    </div>
-    
+
+        <!-- Right Video Display -->
     <div class="video-container">
-      <img id="video-feed" src="/static/placeholder.jpg" alt="Upload a video to begin analysis" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'640\' height=\'480\' viewBox=\'0 0 640 480\'%3E%3Crect width=\'640\' height=\'480\' fill=\'%23f0f0f0\'/%3E%3Ctext x=\'320\' y=\'240\' text-anchor=\'middle\' dominant-baseline=\'middle\' font-family=\'Arial\' font-size=\'20\' fill=\'%23666\'%3EUpload a video to begin analysis%3C/text%3E%3C/svg%3E'">
+            <div class="video-section">
+                <img id="videoFeed" src="" alt="Video Feed">
+                <canvas id="drawCanvas"></canvas>
+                <div class="drawing-controls">
+                    <button id="confirmDrawBtn" style="display: block; min-width: 120px; margin: 0; padding: 8px 16px; font-size: 14px;">Confirm Selection</button>
+                    <button id="cancelDrawBtn" class="secondary" style="display: block; min-width: 120px; margin: 0; padding: 8px 16px; font-size: 14px;">Cancel</button>
+                </div>
+                <div id="placeholder" class="placeholder-content">
+                    <div class="placeholder-logo"></div>
+                    <h2> Real-time Tracking</h2>
+                    <p>Upload a video to begin analysis</p>
+                </div>
+                <div class="playback-controls">
+                    <button class="control-btn" id="playBtn" onclick="togglePlay()" disabled>
+                        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M8 5v14l11-7z"/>
+                        </svg>
+                    </button>
+                    <button class="control-btn" id="stopBtn" onclick="stopVideo()" disabled>
+                        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M6 6h12v12H6z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div id="videoStatus" class="status">No video loaded</div>
     </div>
-    
-    <div class="footer">
-      <p>Powered by YOLO & OpenCV</p>
     </div>
-    
+
     <script>
-      // Current state
-      let currentFilename = null;
-      let trackingEnabled = true;
-      let selectedObjectId = null;
-      
-      // Update video feed source
-      function updateVideoSource() {
-        if (!currentFilename) {
-          return; // No video uploaded yet
+        let currentVideo = null;
+        let selectedObjectId = null;
+        let isPlaying = false;
+        let videoStream = null;
+        let currentFrameIndex = 0;
+        let isDrawingMode = false;
+        let isDrawing = false;
+        let startX, startY;
+        let currentRect = null;
+
+        const videoFeed = document.getElementById('videoFeed');
+        const drawCanvas = document.getElementById('drawCanvas');
+        const confirmBtn = document.getElementById('confirmDrawBtn');
+        const cancelBtn = document.getElementById('cancelDrawBtn');
+        const ctx = drawCanvas.getContext('2d');
+
+        function initializeCanvas() {
+            drawCanvas.width = videoFeed.offsetWidth;
+            drawCanvas.height = videoFeed.offsetHeight;
         }
-        
-        const params = new URLSearchParams();
-        params.append("filename", currentFilename);
-        params.append("tracking", trackingEnabled);
-        
-        // Add object ID if selective tracking is enabled
-        if (selectedObjectId !== null) {
-          params.append("object_id", selectedObjectId);
+
+        function setupDrawingListeners() {
+            drawCanvas.addEventListener('mousedown', startDrawing);
+            drawCanvas.addEventListener('mousemove', draw);
+            drawCanvas.addEventListener('mouseup', endDrawing);
+            drawCanvas.addEventListener('mouseout', endDrawing);
         }
-        
-        document.getElementById('video-feed').src = `/video_feed?${params.toString()}`;
-      }
-      
-      // Toggle tracking mode
-      document.getElementById('tracking-toggle').addEventListener('click', function() {
-        trackingEnabled = !trackingEnabled;
-        const btn = document.getElementById('tracking-toggle');
-        
-        if (trackingEnabled) {
-          btn.textContent = "Tracking: ON";
-          btn.classList.add('active');
-          btn.classList.remove('disabled');
-        } else {
-          btn.textContent = "Tracking: OFF";
-          btn.classList.remove('active');
-          btn.classList.add('disabled');
+
+        function startDrawing(e) {
+            isDrawing = true;
+            const rect = drawCanvas.getBoundingClientRect();
+            startX = e.clientX - rect.left;
+            startY = e.clientY - rect.top;
+            currentRect = {
+                x: startX,
+                y: startY,
+                width: 0,
+                height: 0
+            };
         }
-        
-        updateVideoSource();
-      });
-      
-      // Select specific object to track
-      document.getElementById('select-object-btn').addEventListener('click', function() {
-        const objectIdInput = document.getElementById('object-id-input');
-        const clearBtn = document.getElementById('clear-selection-btn');
-        const statusEl = document.getElementById('selection-status');
-        
-        if (!objectIdInput.value) {
-          statusEl.textContent = "Please enter an Object ID";
-          statusEl.style.color = "#e74c3c";
-          return;
+
+        function draw(e) {
+            if (!isDrawing) return;
+            const rect = drawCanvas.getBoundingClientRect();
+            const currentX = e.clientX - rect.left;
+            const currentY = e.clientY - rect.top;
+
+            currentRect.width = currentX - startX;
+            currentRect.height = currentY - startY;
+
+            ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(currentRect.x, currentRect.y, currentRect.width, currentRect.height);
         }
-        
-        const objectId = parseInt(objectIdInput.value);
-        
-        // Send selection to server
-        fetch('/select_object', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: `object_id=${objectId}`
-        })
-        .then(response => response.json())
-        .then(data => {
-          if (data.success) {
-            selectedObjectId = objectId;
-            statusEl.textContent = `Tracking Object ID: ${objectId}`;
-            statusEl.style.color = "#27ae60";
-            clearBtn.classList.remove('disabled');
+
+        function endDrawing() {
+            if (!isDrawing) return;
+            isDrawing = false;
+            if (currentRect) {
+                confirmBtn.classList.add('active');
+            }
+        }
+
+        function clearDrawing() {
+            ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+            currentRect = null;
+            confirmBtn.classList.remove('active');
+        }
+
+        function toggleDrawingMode() {
+            isDrawingMode = !isDrawingMode;
+            const videoSection = document.querySelector('.video-section');
+            const drawModeBtn = document.getElementById('drawModeBtn');
+            const drawCanvas = document.getElementById('drawCanvas');
+            const drawingControls = document.querySelector('.drawing-controls');
             
-            // Update the video feed
-            updateVideoSource();
-          }
-        })
-        .catch(error => {
-          statusEl.textContent = "Error selecting object";
-          statusEl.style.color = "#e74c3c";
+            console.log("Drawing mode toggled:", isDrawingMode);
+            
+            if (isDrawingMode) {
+                videoSection.classList.add('drawing-active');
+                drawModeBtn.classList.add('active');
+                drawModeBtn.textContent = 'Drawing Mode Active';
+                drawCanvas.style.display = 'block';
+                drawingControls.style.opacity = '1';
+                drawingControls.style.pointerEvents = 'auto';
+                initializeCanvas();
+                setupDrawingListeners();
+                console.log("Added drawing-active class");
+            } else {
+                videoSection.classList.remove('drawing-active');
+                drawModeBtn.classList.remove('active');
+                drawModeBtn.textContent = 'Enable Drawing Mode';
+                drawCanvas.style.display = 'none';
+                drawingControls.style.opacity = '0';
+                drawingControls.style.pointerEvents = 'none';
+                clearDrawing();
+                console.log("Removed drawing-active class");
+            }
+        }
+
+        confirmBtn.addEventListener('click', async () => {
+            if (!currentRect) return;
+            
+            const rect = {
+                x: currentRect.x / drawCanvas.width,
+                y: currentRect.y / drawCanvas.height,
+                width: Math.abs(currentRect.width) / drawCanvas.width,
+                height: Math.abs(currentRect.height) / drawCanvas.height
+            };
+
+            try {
+                document.getElementById('videoStatus').textContent = 'Initializing object tracking...';
+                
+                const response = await fetch('/select_object', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        bbox: rect
+                    })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    // Store the selected object ID returned from server
+                    selectedObjectId = data.selected_id;
+                    
+                    // Log tracking method and details
+                    if (data.method === "detector_refined") {
+                        console.log(`Object tracking initialized with detector refinement. ID: ${selectedObjectId}, Confidence: ${(data.confidence * 100).toFixed(1)}%, IoU: ${(data.iou * 100).toFixed(1)}%`);
+                        document.getElementById('videoStatus').textContent = `Tracking initialized: Detector refined selection (Confidence: ${(data.confidence * 100).toFixed(1)}%)`;
+                    } else {
+                        console.log(`Object tracking initialized with manual selection. ID: ${selectedObjectId}`);
+                        document.getElementById('videoStatus').textContent = `Tracking initialized: Manual selection`;
+                    }
+                    
+                    // Exit drawing mode
+                    toggleDrawingMode();
+                    
+                    // Start playing the video with tracking enabled
+                    isPlaying = true;
+                    startVideoStream();
+                    updateControlButtons();
+                } else {
+                    // Handle errors
+                    console.error("Tracking initialization failed:", data.error);
+                    document.getElementById('videoStatus').textContent = `Tracking failed: ${data.error}`;
+                }
+            } catch (error) {
+                console.error('Error selecting object:', error);
+                document.getElementById('videoStatus').textContent = 'Error initializing tracking';
+            }
         });
-      });
-      
-      // Clear object selection
-      document.getElementById('clear-selection-btn').addEventListener('click', function() {
-        const statusEl = document.getElementById('selection-status');
-        const clearBtn = document.getElementById('clear-selection-btn');
-        
-        // Send clear request to server
-        fetch('/clear_selection', {
-          method: 'POST'
-        })
-        .then(response => response.json())
-        .then(data => {
-          if (data.success) {
-            selectedObjectId = null;
-            statusEl.textContent = "Tracking all objects";
-            statusEl.style.color = "#3498db";
-            clearBtn.classList.add('disabled');
-            document.getElementById('object-id-input').value = '';
-            
-            // Update the video feed
-            updateVideoSource();
-          }
-        })
-        .catch(error => {
-          statusEl.textContent = "Error clearing selection";
-          statusEl.style.color = "#e74c3c";
+
+        cancelBtn.addEventListener('click', () => {
+            clearDrawing();
+            toggleDrawingMode();
         });
-      });
-      
-      // Handle video upload
-      document.getElementById('video-upload-form').addEventListener('submit', function(e) {
-        e.preventDefault();
-        
-        const formData = new FormData();
-        const fileInput = document.getElementById('video-file');
-        
-        if (fileInput.files.length === 0) {
-          document.getElementById('upload-status').textContent = 'Please select a video file';
-          document.getElementById('upload-status').style.color = '#e74c3c';
-          return;
-        }
-        
-        formData.append('video', fileInput.files[0]);
-        
-        document.getElementById('upload-status').textContent = 'Uploading...';
-        document.getElementById('upload-status').style.color = '#3498db';
-        
-        fetch('/upload_video', {
-          method: 'POST',
-          body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-          if (data.success) {
-            document.getElementById('upload-status').textContent = 'Upload successful! Processing video...';
-            document.getElementById('upload-status').style.color = '#27ae60';
-            currentFilename = data.filename;
+
+        function uploadVideo() {
+            const fileInput = document.getElementById('videoInput');
+            const file = fileInput.files[0];
             
-            // Reset selective tracking when loading a new video
-            selectedObjectId = null;
-            document.getElementById('selection-status').textContent = '';
-            document.getElementById('object-id-input').value = '';
-            document.getElementById('clear-selection-btn').classList.add('disabled');
+            if (!file) {
+                alert('Please select a video file first');
+                return;
+            }
             
-            updateVideoSource();
-          } else {
-            document.getElementById('upload-status').textContent = 'Upload failed: ' + data.error;
-            document.getElementById('upload-status').style.color = '#e74c3c';
-          }
-        })
-        .catch(error => {
-          document.getElementById('upload-status').textContent = 'Error: ' + error;
-          document.getElementById('upload-status').style.color = '#e74c3c';
-        });
-      });
-      
-      // Shutdown server functionality
-      document.getElementById('shutdown-btn').addEventListener('click', function() {
-        if (confirm('Are you sure you want to shut down the server? All uploaded videos will be deleted.')) {
-          fetch('/shutdown')
+            // Clear any previous state
+            resetState();
+            document.getElementById('videoStatus').textContent = 'Uploading video...';
+            
+            const formData = new FormData();
+            formData.append('video', file);
+            
+            fetch('/upload_video', {
+                method: 'POST',
+                body: formData
+            })
             .then(response => response.json())
             .then(data => {
-              alert('Server shutting down...');
-              // Disable all interactive elements
-              const buttons = document.querySelectorAll('.btn');
-              buttons.forEach(btn => {
-                btn.disabled = true;
-                btn.classList.add('disabled');
-              });
-              document.getElementById('video-file').disabled = true;
-              document.getElementById('object-id-input').disabled = true;
+                if (data.success) {
+                    currentVideo = data.filename;
+                    document.getElementById('videoStatus').textContent = 'Video uploaded successfully';
+                    loadFirstFrame();
+                    updateControlButtons();
+                } else {
+                    document.getElementById('videoStatus').textContent = 'Upload failed: ' + data.error;
+                }
             })
             .catch(error => {
-              console.error('Error shutting down server:', error);
+                console.error('Error:', error);
+                document.getElementById('videoStatus').textContent = 'Upload error';
             });
         }
-      });
+
+        function resetState() {
+            // Reset all state variables
+            selectedObjectId = null;
+            isPlaying = false;
+            currentFrameIndex = 0;
+            
+            // Clear canvas
+            if (drawCanvas) {
+                const ctx = drawCanvas.getContext('2d');
+                ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+            }
+            
+            // Reset any active drawing mode
+            const videoSection = document.querySelector('.video-section');
+            if (videoSection && videoSection.classList.contains('drawing-active')) {
+                toggleDrawingMode();
+            }
+            
+            // Clear video feed
+            const videoFeed = document.getElementById('videoFeed');
+            if (videoFeed) {
+                videoFeed.src = '';
+                videoFeed.style.display = 'none';
+            }
+            
+            // Show placeholder
+            const placeholder = document.getElementById('placeholder');
+            if (placeholder) {
+                placeholder.style.display = 'flex';
+            }
+            
+            console.log("Application state has been reset");
+        }
+
+        function loadFirstFrame() {
+            const videoFeed = document.getElementById('videoFeed');
+            const placeholder = document.getElementById('placeholder');
+            const params = new URLSearchParams();
+            params.append('filename', currentVideo);
+            params.append('frame', 'first');
+            
+            videoFeed.src = `/video_frame?${params.toString()}`;
+            videoFeed.classList.add('active');
+            placeholder.style.display = 'none';
+            videoFeed.style.display = 'block';
+        }
+
+        function pauseVideoStream() {
+            if (!currentVideo) return;
+            
+            // First, immediately pause the visual display by freezing the current frame
+            // This creates a more responsive pause experience for the user
+            const videoFeed = document.getElementById('videoFeed');
+            
+            // Take a snapshot of the current frame being displayed
+            const canvas = document.createElement('canvas');
+            canvas.width = videoFeed.width || videoFeed.offsetWidth;
+            canvas.height = videoFeed.height || videoFeed.offsetHeight;
+            
+            // Store the current src to restore later if needed
+            const originalSrc = videoFeed.src;
+            
+            // Update UI immediately to show paused state
+            document.getElementById('videoStatus').textContent = 'Pausing video...';
+            
+            // Get current frame index from server 
+            fetch('/current_frame_index')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Store the frame index for resuming
+                        currentFrameIndex = data.frame_index;
+                        console.log(`Paused at frame: ${currentFrameIndex}`);
+                        
+                        // Now get the high-quality current frame from server
+                        const params = new URLSearchParams();
+                        params.append('filename', currentVideo);
+                        params.append('frame', 'current');
+                        
+                        // Set the image source to the high-quality current frame
+                        videoFeed.src = `/video_frame?${params.toString()}`;
+                        document.getElementById('videoStatus').textContent = `Video paused at frame ${currentFrameIndex}`;
+                    } else {
+                        // Fallback if getting the frame index fails
+                        document.getElementById('videoStatus').textContent = 'Video paused';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error getting frame index:', error);
+                    // Fallback if the server request fails
+                    document.getElementById('videoStatus').textContent = 'Video paused';
+                });
+        }
+
+        function startVideoStream() {
+            if (!currentVideo) return;
+            
+            const videoFeed = document.getElementById('videoFeed');
+            const placeholder = document.getElementById('placeholder');
+            const params = new URLSearchParams();
+            
+            // Update UI to show loading state
+            document.getElementById('videoStatus').textContent = 'Loading video stream...';
+            
+            params.append('filename', currentVideo);
+            
+            // Enable tracking only when a specific object is selected
+            const trackingEnabled = selectedObjectId !== null;
+            params.append('tracking', trackingEnabled.toString());
+            
+            if (selectedObjectId !== null) {
+                params.append('object_id', selectedObjectId);
+                console.log(`Starting video stream with tracking for object ID: ${selectedObjectId}`);
+            } else {
+                console.log('Starting video stream with detection of all objects');
+            }
+            
+            // If we're resuming from a paused state, pass the current frame index
+            if (currentFrameIndex > 0) {
+                params.append('start_frame', currentFrameIndex);
+                console.log(`Resuming from frame: ${currentFrameIndex}`);
+                
+                // Update status to show resuming
+                document.getElementById('videoStatus').textContent = 
+                    selectedObjectId !== null 
+                        ? `Resuming tracking from frame ${currentFrameIndex}...` 
+                        : `Resuming detection from frame ${currentFrameIndex}...`;
+            } else {
+                document.getElementById('videoStatus').textContent = 
+                    selectedObjectId !== null 
+                        ? 'Starting object tracking...' 
+                        : 'Starting object detection...';
+            }
+            
+            const streamUrl = `/video_feed?${params.toString()}`;
+            console.log(`Stream URL: ${streamUrl}`);
+            
+            // Set the source to the video stream
+            videoFeed.src = streamUrl;
+            videoFeed.classList.add('active');
+            videoFeed.style.display = 'block';
+            placeholder.style.display = 'none';
+            
+            // Add a load event listener to update the status once the stream is active
+            videoFeed.onload = function() {
+                document.getElementById('videoStatus').textContent = 
+                    selectedObjectId !== null 
+                        ? `Tracking object ID: ${selectedObjectId}` 
+                        : 'Detecting all objects...';
+            };
+        }
+
+        function stopVideo() {
+            if (!currentVideo) return;
+            
+            isPlaying = false;
+            currentFrameIndex = 0; // Reset frame index when stopping
+            loadFirstFrame();
+            document.getElementById('videoStatus').textContent = 'Video stopped';
+            updateControlButtons();
+        }
+
+        function updateControlButtons() {
+            const playBtn = document.getElementById('playBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            
+            playBtn.disabled = !currentVideo;
+            stopBtn.disabled = !currentVideo;
+
+            // Update play button icon with better SVG paths
+            playBtn.innerHTML = isPlaying ? 
+                '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg>' : 
+                '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M8 5v14l11-7z"/></svg>';
+        }
+
+        function togglePlay() {
+            if (!currentVideo) return;
+            
+            isPlaying = !isPlaying;
+            
+            if (isPlaying) {
+                startVideoStream();
+            } else {
+                pauseVideoStream();
+            }
+            
+            updateControlButtons();
+        }
+
+        function updateVideoFeed() {
+            if (!currentVideo) {
+                document.getElementById('videoStatus').textContent = 'No video loaded';
+                document.getElementById('placeholder').style.display = 'block';
+                document.getElementById('videoFeed').style.display = 'none';
+                document.getElementById('videoFeed').classList.remove('active');
+                updateControlButtons();
+                return;
+            }
+
+            if (isPlaying) {
+                startVideoStream();
+            } else {
+                loadFirstFrame();
+            }
+        }
+
+        async function clearSelection() {
+            try {
+                const response = await fetch('/clear_selection', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                if (data.success) {
+                    // Reset the selected object ID
+                    selectedObjectId = null;
+                    console.log("Cleared object selection");
+                    
+                    // Restart video stream without tracking
+                    startVideoStream();
+                    document.getElementById('videoStatus').textContent = 'Object tracking cleared';
+                }
+            } catch (error) {
+                console.error('Error clearing selection:', error);
+            }
+        }
+
+        function shutdownServer() {
+            if (confirm('Are you sure you want to shutdown the server?')) {
+                fetch('/shutdown')
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message);
+                    })
+                    .catch(error => {
+                        alert('Failed to shutdown server: ' + error);
+                    });
+            }
+        }
+
+        // Update control buttons on page load
+        document.addEventListener('DOMContentLoaded', updateControlButtons);
+
+        // Add resize event listener to handle canvas resizing
+        window.addEventListener('resize', () => {
+            if (isDrawingMode) {
+                initializeCanvas();
+            }
+        });
     </script>
   </body>
 </html>

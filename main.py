@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
-from fastapi import FastAPI, Request, BackgroundTasks, File, UploadFile, Form, Query, Depends
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, Request, BackgroundTasks, File, UploadFile, Form, Query, Depends, Body
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from ultralytics import YOLO
@@ -15,8 +15,9 @@ import time
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 from collections import defaultdict
+from pydantic import BaseModel
 
 # Create uploads directory if it doesn't exist
 UPLOAD_DIR = Path("uploads")
@@ -42,14 +43,21 @@ current_video_path = None
 selected_object_id = None
 
 # Standard dimensions for video processing
-STD_WIDTH = 640
-STD_HEIGHT = 480
+STD_WIDTH = 1280
+STD_HEIGHT = 720
+
+class BoundingBox(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
 
 # Function to safely load the YOLO model
 def load_yolo_model(model_path):
     try:
         # Try to load with default settings first
         model = YOLO(model_path)
+        # model = YOLO("yolo11n.pt")
         
         # Prepare model for inference without fusion
         dummy_img = np.zeros((STD_HEIGHT, STD_WIDTH, 3), dtype=np.uint8)
@@ -86,7 +94,7 @@ try:
         # Configure PyTorch for better memory management
         torch.backends.cudnn.benchmark = True
         
-    model = load_yolo_model("models/best.pt")
+    model = load_yolo_model("models/100.pt")
 except Exception as e:
     print(f"Critical error loading model: {e}")
     print("Using basic YOLO model as fallback")
@@ -99,6 +107,173 @@ track_history = defaultdict(list)
 box_size_history = defaultdict(list)
 direction_history = {}
 speed_history = {}
+
+# Add feature-based tracking capabilities
+def extract_features(frame, box):
+    """Extract appearance features from the object region"""
+    x, y, w, h = box
+    x1, y1 = int(x - w/2), int(y - h/2)
+    x2, y2 = int(x + w/2), int(y + h/2)
+    # Get region of interest and compute histogram features
+    roi = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
+    if roi.size == 0:
+        return None
+    # Convert to HSV for better color consistency
+    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    # Calculate histogram for appearance matching
+    hist = cv2.calcHist([hsv_roi], [0, 1], None, [16, 16], [0, 180, 0, 256])
+    cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+    return hist
+
+def compare_features(hist1, hist2):
+    """Compare two feature histograms for similarity"""
+    if hist1 is None or hist2 is None:
+        return 0
+    return cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+
+class RobustObjectTracker:
+    """Improved object tracker with re-identification capabilities"""
+    def __init__(self, object_id, initial_box=None, frame=None):
+        self.id = object_id
+        self.reference_features = None
+        self.last_position = None
+        self.last_size = None
+        self.velocity = [0, 0]
+        self.last_seen = 0
+        self.state = "Active"  # Active, Lost, or Recovered
+        self.lost_frames = 0
+        self.max_lost_frames = 30  # How long to keep predicting position
+        self.prediction_only = False
+        
+        # Initialize with frame and box if provided
+        if initial_box is not None and frame is not None:
+            self.update_features(frame, initial_box)
+            
+    def update_features(self, frame, box):
+        """Update the reference features for this object"""
+        x, y, w, h = box
+        self.last_position = (x, y)
+        self.last_size = (w, h)
+        self.reference_features = extract_features(frame, box)
+        
+    def predict_position(self):
+        """Predict next position based on velocity"""
+        if self.last_position is None:
+            return None
+        x, y = self.last_position
+        vx, vy = self.velocity
+        return (x + vx, y + vy)
+        
+    def update_velocity(self, new_position):
+        """Update velocity based on position change"""
+        if self.last_position is None:
+            self.last_position = new_position
+            return
+        
+        x_old, y_old = self.last_position
+        x_new, y_new = new_position
+        
+        # Calculate new velocity with smoothing
+        smoothing = 0.7  # Higher value means slower adaptation
+        vx = (x_new - x_old) * (1 - smoothing) + self.velocity[0] * smoothing
+        vy = (y_new - y_old) * (1 - smoothing) + self.velocity[1] * smoothing
+        
+        self.velocity = [vx, vy]
+        
+    def find_best_match(self, frame, boxes, ids):
+        """Find the best matching detection for this tracked object"""
+        if len(boxes) == 0:
+            return None, None, 0
+            
+        best_match_id = None
+        best_match_box = None
+        best_score = -1
+        
+        # Get predicted position if we have velocity
+        predicted_pos = self.predict_position()
+        
+        for i, (box, obj_id) in enumerate(zip(boxes, ids)):
+            # Extract features for this detection
+            features = extract_features(frame, box)
+            
+            # Calculate position similarity
+            pos_score = 0
+            if predicted_pos is not None:
+                x, y, w, h = box
+                dist = np.sqrt((predicted_pos[0] - x)**2 + (predicted_pos[1] - y)**2)
+                pos_score = max(0, 1 - dist / 300)  # Normalize distance (300px max distance)
+            
+            # Calculate size similarity
+            size_score = 0
+            if self.last_size is not None:
+                w, h = box[2:4]
+                w_last, h_last = self.last_size
+                size_diff = abs(w/w_last - 1) + abs(h/h_last - 1)
+                size_score = max(0, 1 - size_diff / 1.0)  # Normalize size difference
+            
+            # Calculate appearance similarity
+            appear_score = compare_features(self.reference_features, features)
+            
+            # Combined score with weighted components
+            combined_score = (0.4 * pos_score + 
+                              0.2 * size_score + 
+                              0.4 * appear_score)
+            
+            if combined_score > best_score:
+                best_score = combined_score
+                best_match_id = obj_id
+                best_match_box = box
+        
+        threshold = 0.4  # Minimum score required for a valid match
+        if best_score < threshold:
+            return None, None, 0
+            
+        return best_match_id, best_match_box, best_score
+        
+    def update(self, frame, boxes, ids, frame_count):
+        """Update tracker with new detections"""
+        self.lost_frames += 1
+        self.prediction_only = True
+        
+        # Find best matching detection
+        match_id, match_box, match_score = self.find_best_match(frame, boxes, ids)
+        
+        if match_box is not None:
+            # We found a good match
+            x, y, w, h = match_box
+            
+            # Update tracker
+            self.last_position = (x, y)
+            self.last_size = (w, h)
+            self.update_velocity((x, y))
+            self.last_seen = frame_count
+            self.lost_frames = 0
+            self.prediction_only = False
+            
+            # Update reference features (occasional updates to adapt to appearance changes)
+            if frame_count % 10 == 0:
+                self.update_features(frame, match_box)
+            
+            if self.state == "Lost":
+                self.state = "Recovered"
+            else:
+                self.state = "Active"
+            
+            return match_id, True
+        elif self.lost_frames > self.max_lost_frames:
+            # Object lost for too long
+            self.state = "Lost"
+            return None, False
+        else:
+            # Object temporarily lost, use motion prediction
+            self.state = "Lost"
+            predicted_pos = self.predict_position()
+            if predicted_pos is not None and self.last_size is not None:
+                self.last_position = predicted_pos
+            return None, True
+
+# Global tracker object for selected object
+robust_tracker = None
 
 # Function to predict direction
 def predict_direction(points, box_sizes, num_points=5):
@@ -225,21 +400,36 @@ def reset_tracking_cache():
     except:
         pass
 
-def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int] = None):
+def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int] = None, start_frame: int = 0):
     """Process the uploaded video and yield frames with detection/tracking"""
     global track_history, box_size_history, direction_history, speed_history, frame_count, fps, running
-    global current_video_path, selected_object_id
+    global current_video_path, selected_object_id, robust_tracker
+    
+    # Store current frame for pause functionality
+    if not hasattr(process_video, 'current_frame'):
+        process_video.current_frame = None
+    
+    # Store current frame index for resuming
+    if not hasattr(process_video, 'current_frame_index'):
+        process_video.current_frame_index = 0
+    
+    # Performance monitoring variables
+    frame_times = []
+    last_frame_time = time.time()
+    processing_start_time = time.time()
     
     # Set selected object ID from parameter if provided
     if obj_id is not None:
         selected_object_id = obj_id
     
-    # Reset tracking data for new video
-    track_history = defaultdict(list)
-    box_size_history = defaultdict(list)
-    direction_history = {}
-    speed_history = {}
-    frame_count = 0
+    # Reset tracking data for new video or if starting from beginning
+    if start_frame == 0:
+        track_history = defaultdict(list)
+        box_size_history = defaultdict(list)
+        direction_history = {}
+        speed_history = {}
+        frame_count = 0
+        robust_tracker = None
     
     # Handle uploaded video
     if not filename:
@@ -259,6 +449,15 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
         print(f"Error: Could not open video source {video_source}")
         return
 
+    # Get video orientation from metadata
+    rotation = 0
+    try:
+        # Try to get rotation from video metadata
+        rotation = int(cap.get(cv2.CAP_PROP_ORIENTATION_META))
+        print(f"Video rotation metadata: {rotation} degrees")
+    except:
+        print("No rotation metadata found, assuming 0 degrees")
+
     # Get actual FPS from video
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
@@ -272,9 +471,24 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
     width = STD_WIDTH
     height = STD_HEIGHT
     
+    # Get total frames in video
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
     print(f"Processing video: {filename}")
     print(f"Original dimensions: {original_width}x{original_height}, Standardized: {width}x{height}")
-    print(f"FPS: {fps}")
+    print(f"FPS: {fps}, Total frames: {total_frames}")
+    print(f"Starting from frame: {start_frame}")
+    
+    # Set starting frame - optimized for resuming
+    if start_frame > 0 and start_frame < total_frames:
+        print(f"Seeking to frame {start_frame} for resuming playback")
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        frame_index = start_frame
+        
+        # Adjust frame_count to continue from where we left off
+        frame_count = start_frame
+    else:
+        frame_index = 0
     
     # Maximum history length for tracking
     max_history = 60
@@ -286,9 +500,21 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
     
     # Initialize tracking with dummy frames if needed
     prev_frame = None
-    frame_index = 0
+
+    # Optimization: Pre-allocate memory for the frame to reduce allocation overhead
+    process_video.last_frame_time = time.time()
+    
+    # Tracking resumption - when resuming from a pause with tracking enabled,
+    # we need to reinitialize tracking to avoid jitter
+    if start_frame > 0 and tracking_enabled and selected_object_id is not None:
+        reset_tracking_cache()
+        print("Reset tracking cache for smooth resumption")
+
+    # Initial features for object appearance modeling
+    initial_features = None
 
     while running:
+        frame_start_time = time.time()
         success, frame = cap.read()
         if not success:
             # Loop back to the beginning when video ends
@@ -307,9 +533,18 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
                     break
             else:
                 break
-                
+
         frame_index += 1
         frame_count += 1
+        
+        # Apply rotation if needed
+        if rotation != 0:
+            # Calculate rotation matrix
+            center = (frame.shape[1] // 2, frame.shape[0] // 2)
+            rotation_matrix = cv2.getRotationMatrix2D(center, rotation, 1.0)
+            
+            # Apply rotation
+            frame = cv2.warpAffine(frame, rotation_matrix, (frame.shape[1], frame.shape[0]))
         
         # Resize frame to standard dimensions to ensure consistent processing
         frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
@@ -331,11 +566,76 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
             
         # Run detection/tracking on the frame
         try:
-            if tracking_enabled:
-                results = model.track(frame, persist=True)
+            if tracking_enabled and selected_object_id is not None:
+                if isinstance(selected_object_id, dict) and 'bbox' in selected_object_id:
+                    # Initialize tracking with the selected bounding box
+                    # Convert from [x1,y1,x2,y2] to [x1,y1,w,h] if needed
+                    bbox = selected_object_id['bbox']
+                    if len(bbox) == 4:
+                        if bbox[2] > bbox[0] and bbox[3] > bbox[1]:
+                            # It's in [x1,y1,x2,y2] format, convert to [x1,y1,w,h]
+                            w = bbox[2] - bbox[0]
+                            h = bbox[3] - bbox[1]
+                            tracking_box = [bbox[0], bbox[1], w, h]
+                        else:
+                            # Already in [x1,y1,w,h] format
+                            tracking_box = bbox
+                    else:
+                        tracking_box = bbox  # Use as-is if not in expected format
+                    
+                    print(f"Initializing tracking with box: {tracking_box}")
+                    results = model.track(frame, persist=True, boxes=[tracking_box])
+                    
+                    # After first frame, convert selected_object_id to track ID
+                    if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None:
+                        track_ids = results[0].boxes.id.cpu().numpy()
+                        if len(track_ids) > 0:
+                            print(f"Assigned track ID: {int(track_ids[0])}")
+                            selected_object_id = int(track_ids[0])
+                            
+                            # Initialize robust tracker with selected object
+                            if robust_tracker is None:
+                                boxes = results[0].boxes.xywh.cpu().numpy()
+                                robust_tracker = RobustObjectTracker(selected_object_id, boxes[0], frame)
+                                print(f"Initialized robust tracker for object ID: {selected_object_id}")
+                        else:
+                            print("No track ID assigned, retrying detection")
+                            # If tracking failed, try detection again
+                            results = model(frame)
+                else:
+                    # Continue tracking with existing ID
+                    results = model.track(frame, persist=True)
             else:
-                # Use detection only (no tracking) if tracking is disabled or too many errors
+                # Use detection only if tracking is disabled or no object selected
                 results = model(frame)
+                
+                # When in detection mode, we need to ignore the selected_object_id
+                # so that all detected objects are shown
+                if not tracking_enabled:
+                    selected_object_id = None
+            
+            # Calculate and log processing time
+            processing_time = time.time() - frame_start_time
+            frame_times.append(processing_time)
+            
+            # Store the time since the last frame to regulate frame rate
+            current_time = time.time()
+            frame_delta = current_time - process_video.last_frame_time
+            process_video.last_frame_time = current_time
+            
+            # Log performance metrics every 30 frames
+            if frame_count % 30 == 0:
+                avg_time = sum(frame_times[-30:]) / len(frame_times[-30:])
+                current_fps = 1.0 / avg_time
+                elapsed_time = time.time() - processing_start_time
+                print(f"\nPerformance Metrics (Last 30 frames):")
+                print(f"Average Processing Time: {avg_time*1000:.2f}ms")
+                print(f"Current FPS: {current_fps:.2f}")
+                print(f"Frame Index: {frame_index}, Frame Count: {frame_count}")
+                print(f"Elapsed Time: {elapsed_time:.2f}s")
+                print(f"GPU Memory Usage: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
+                print(f"GPU Memory Cached: {torch.cuda.memory_reserved(0) / 1e9:.2f} GB")
+                frame_times = []  # Reset for next batch
             
             annotated_frame = frame.copy()
             
@@ -366,136 +666,296 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
                     if track_ids is None:
                         track_ids = np.arange(len(boxes))
                     
-                    for i, (box, track_id) in enumerate(zip(boxes, track_ids)):
-                        # Extract box coordinates
-                        x, y, w, h = box
-                        x, y, w, h = float(x), float(y), float(w), float(h)
+                    # Enhanced tracking with robust tracker
+                    found_selected_object = False
+                    
+                    # If using robust tracking and we have an active tracker
+                    if tracking_enabled and selected_object_id is not None and robust_tracker is not None:
+                        # Update the robust tracker with new detections
+                        matched_id, tracking_ok = robust_tracker.update(frame, boxes, track_ids, frame_count)
                         
-                        # Only process the selected object if selective tracking is enabled
-                        if selected_object_id is not None and track_id != selected_object_id:
-                            # Skip objects that are not selected
-                            continue
-                        
-                        # Draw bounding box
-                        x1, y1 = int(x - w / 2), int(y - h / 2)
-                        x2, y2 = int(x + w / 2), int(y + h / 2)
-                        
-                        # Use green color for all objects or a different color for selected object
-                        box_color = (0, 255, 0)  # Default green
-                        if selected_object_id is not None and track_id == selected_object_id:
-                            box_color = (0, 165, 255)  # Orange for selected object
-                        
-                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 2)
-                        
-                        # Add a label with the object ID
-                        label = f"ID: {track_id}"
-                        cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
-                        
-                        # Track position history
-                        track = track_history[track_id]
-                        track.append((x, y))  # center point
-                        
-                        # Track box size history
-                        box_sizes = box_size_history[track_id]
-                        box_sizes.append((w, h))
-                        
-                        # Limit history length
-                        if len(track) > max_history:
-                            track.pop(0)
-                        if len(box_sizes) > max_history:
-                            box_sizes.pop(0)
-                        
-                        # Draw the tracking line
-                        if len(track) > 1:
-                            points = np.array(track, dtype=np.int32).reshape((-1, 1, 2))
-                            cv2.polylines(annotated_frame, [points], isClosed=False,
-                                        color=(230, 230, 230), thickness=2)
-                        
-                        # Calculate direction and speed every 5 frames
-                        if frame_count % 5 == 0 and len(track) > 5 and len(box_sizes) > 5:
-                            horizontal, vertical, depth, angle = predict_direction(track, box_sizes)
+                        if tracking_ok:
+                            # Extract the most recent position and size for display
+                            last_x, last_y = robust_tracker.last_position
+                            last_w, last_h = robust_tracker.last_size
                             
-                            # Calculate speed
-                            speed_kmh, px_per_frame = calculate_speed(track, fps, pixels_per_meter)
+                            # Draw the bounding box for the robustly tracked object
+                            x1, y1 = int(last_x - last_w / 2), int(last_y - last_h / 2)
+                            x2, y2 = int(last_x + last_w / 2), int(last_y + last_h / 2)
                             
-                            # Store direction and speed data
-                            direction_history[track_id] = {
-                                'horizontal': horizontal,
-                                'vertical': vertical,
-                                'depth': depth,
-                                'angle': angle
-                            }
+                            # Use color based on tracking state
+                            if robust_tracker.state == "Active":
+                                box_color = (0, 255, 0)  # Green for active tracking
+                            elif robust_tracker.state == "Lost":
+                                box_color = (0, 0, 255)  # Red for lost but predicting
+                            else:  # Recovered
+                                box_color = (0, 165, 255)  # Orange for recovered
                             
-                            if speed_kmh is not None:
-                                speed_history[track_id] = {
-                                    'kmh': speed_kmh,
-                                    'px_per_frame': px_per_frame
+                            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 2)
+                            
+                            # Add a label with the object ID
+                            track_status = f"ID: {robust_tracker.id}"
+                            if robust_tracker.prediction_only:
+                                track_status += " (Predicted)"
+                            cv2.putText(annotated_frame, track_status, (x1, y1 - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+                            
+                            # Update tracking history for visualization
+                            track_id = robust_tracker.id  # Use the original ID
+                            track_history[track_id].append((last_x, last_y))
+                            box_size_history[track_id].append((last_w, last_h))
+                            
+                            # Limit history length
+                            if len(track_history[track_id]) > max_history:
+                                track_history[track_id].pop(0)
+                            if len(box_size_history[track_id]) > max_history:
+                                box_size_history[track_id].pop(0)
+                            
+                            # Draw the tracking line
+                            track = track_history[track_id]
+                            if len(track) > 1:
+                                points = np.array(track, dtype=np.int32).reshape((-1, 1, 2))
+                                cv2.polylines(annotated_frame, [points], isClosed=False,
+                                            color=(230, 230, 230), thickness=2)
+                            
+                            # Calculate direction and speed every 5 frames
+                            if frame_count % 5 == 0 and len(track) > 5 and len(box_size_history[track_id]) > 5:
+                                horizontal, vertical, depth, angle = predict_direction(
+                                    track, box_size_history[track_id])
+                                
+                                # Calculate speed
+                                speed_kmh, px_per_frame = calculate_speed(track, fps, pixels_per_meter)
+                                
+                                # Store direction and speed data
+                                direction_history[track_id] = {
+                                    'horizontal': horizontal,
+                                    'vertical': vertical,
+                                    'depth': depth,
+                                    'angle': angle
                                 }
-                        
-                        # Draw direction arrow
-                        if track_id in direction_history:
-                            dir_data = direction_history[track_id]
-                            if (dir_data['horizontal'] != "Stationary" or 
-                                dir_data['vertical'] != "Stationary"):
                                 
-                                angle = dir_data['angle']
-                                arrow_start = (int(track[-1][0]), int(track[-1][1]))
-                                
-                                if angle is not None:
-                                    arrow_length = 40
-                                    end_x = arrow_start[0] + arrow_length * math.cos(math.radians(angle))
-                                    end_y = arrow_start[1] - arrow_length * math.sin(math.radians(angle))
-                                    arrow_end = (int(end_x), int(end_y))
+                                if speed_kmh is not None:
+                                    speed_history[track_id] = {
+                                        'kmh': speed_kmh,
+                                        'px_per_frame': px_per_frame
+                                    }
+                            
+                            # Draw direction arrow
+                            if track_id in direction_history:
+                                dir_data = direction_history[track_id]
+                                if (dir_data['horizontal'] != "Stationary" or 
+                                    dir_data['vertical'] != "Stationary"):
                                     
-                                    # Draw direction arrow
-                                    cv2.arrowedLine(annotated_frame, arrow_start, arrow_end,
-                                                (0, 165, 255), 2, tipLength=0.3)
-                        
-                        # Draw depth movement arrow
-                        if track_id in direction_history:
-                            depth_dir = direction_history[track_id]['depth']
-                            if depth_dir != "Same Distance":
-                                center_x, center_y = int(x), int(y)
-                                
-                                if depth_dir == "Toward Camera":
-                                    cv2.arrowedLine(annotated_frame,
-                                                (center_x, center_y),
-                                                (center_x, center_y - 40),
-                                                (255, 0, 255), 2, tipLength=0.3)
-                                else:  # Away from Camera
-                                    cv2.arrowedLine(annotated_frame,
-                                                (center_x, center_y),
-                                                (center_x, center_y + 40),
-                                                (255, 0, 255), 2, tipLength=0.3)
-                        
-                        # Display information in overlay
-                        y_position = 35
-                        
-                        # Display object ID
-                        cv2.putText(annotated_frame, f"Object ID: {track_id}", (20, y_position),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-                        y_position += 20
-                        
-                        # Display direction info
-                        if track_id in direction_history:
-                            dir_data = direction_history[track_id]
-                            direction_text = f"Direction: {dir_data['horizontal']} | {dir_data['vertical']}"
-                            cv2.putText(annotated_frame, direction_text, (20, y_position),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                                    angle = dir_data['angle']
+                                    arrow_start = (int(track[-1][0]), int(track[-1][1]))
+                                    
+                                    if angle is not None:
+                                        arrow_length = 40
+                                        end_x = arrow_start[0] + arrow_length * math.cos(math.radians(angle))
+                                        end_y = arrow_start[1] - arrow_length * math.sin(math.radians(angle))
+                                        arrow_end = (int(end_x), int(end_y))
+                                        
+                                        # Draw direction arrow
+                                        cv2.arrowedLine(annotated_frame, arrow_start, arrow_end,
+                                                    (0, 165, 255), 2, tipLength=0.3)
+                            
+                            # Draw depth movement arrow
+                            if track_id in direction_history:
+                                depth_dir = direction_history[track_id]['depth']
+                                if depth_dir != "Same Distance":
+                                    center_x, center_y = int(last_x), int(last_y)
+                                    
+                                    if depth_dir == "Toward Camera":
+                                        cv2.arrowedLine(annotated_frame,
+                                                    (center_x, center_y),
+                                                    (center_x, center_y - 40),
+                                                    (255, 0, 255), 2, tipLength=0.3)
+                                    else:  # Away from Camera
+                                        cv2.arrowedLine(annotated_frame,
+                                                    (center_x, center_y),
+                                                    (center_x, center_y + 40),
+                                                    (255, 0, 255), 2, tipLength=0.3)
+                            
+                            # Display information in overlay
+                            y_position = 35
+                            
+                            # Display object ID and tracking state
+                            cv2.putText(annotated_frame, f"Object ID: {track_id} ({robust_tracker.state})", 
+                                      (20, y_position), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
                             y_position += 20
                             
-                            depth_text = f"Depth: {dir_data['depth']}"
-                            cv2.putText(annotated_frame, depth_text, (20, y_position),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-                            y_position += 20
-                        
-                        # Display speed info
-                        if track_id in speed_history:
-                            speed_data = speed_history[track_id]
-                            speed_text = f"Speed: {speed_data['kmh']:.1f} km/h"
-                            cv2.putText(annotated_frame, speed_text, (20, y_position),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                            # Display direction info
+                            if track_id in direction_history:
+                                dir_data = direction_history[track_id]
+                                direction_text = f"Direction: {dir_data['horizontal']} | {dir_data['vertical']}"
+                                cv2.putText(annotated_frame, direction_text, (20, y_position),
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                                y_position += 20
+                                
+                                depth_text = f"Depth: {dir_data['depth']}"
+                                cv2.putText(annotated_frame, depth_text, (20, y_position),
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                                y_position += 20
+                            
+                            # Display speed info
+                            if track_id in speed_history:
+                                speed_data = speed_history[track_id]
+                                speed_text = f"Speed: {speed_data['kmh']:.1f} km/h"
+                                cv2.putText(annotated_frame, speed_text, (20, y_position),
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                                y_position += 20
+                            
+                            # Mark the selected object as found
+                            found_selected_object = True
+                    
+                    # Process all other objects (or all if no robust tracking)
+                    if not found_selected_object or not tracking_enabled:
+                        for i, (box, track_id) in enumerate(zip(boxes, track_ids)):
+                            # Skip if we're doing selective tracking and this isn't our object
+                            if tracking_enabled and selected_object_id is not None and track_id != selected_object_id:
+                                continue
+                                
+                            # Initialize robust tracker if we found our selected object
+                            if tracking_enabled and selected_object_id is not None and track_id == selected_object_id:
+                                if robust_tracker is None:
+                                    robust_tracker = RobustObjectTracker(selected_object_id, box, frame)
+                                    print(f"Initialized robust tracker for object ID: {selected_object_id}")
+                                else:
+                                    # Just update tracker with new position
+                                    robust_tracker.update_features(frame, box)
+                            
+                            # Extract box coordinates
+                            x, y, w, h = box
+                            x, y, w, h = float(x), float(y), float(w), float(h)
+                            
+                            # Draw bounding box
+                            x1, y1 = int(x - w / 2), int(y - h / 2)
+                            x2, y2 = int(x + w / 2), int(y + h / 2)
+                            
+                            # Use green color for all objects or a different color for selected object
+                            box_color = (0, 255, 0)  # Default green
+                            if selected_object_id is not None and track_id == selected_object_id:
+                                box_color = (0, 165, 255)  # Orange for selected object
+                            
+                            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 2)
+                            
+                            # Add a label with the object ID
+                            label = f"ID: {track_id}"
+                            cv2.putText(annotated_frame, label, (x1, y1 - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+                            
+                            # Track position history
+                            track = track_history[track_id]
+                            track.append((x, y))  # center point
+                            
+                            # Track box size history
+                            box_sizes = box_size_history[track_id]
+                            box_sizes.append((w, h))
+                            
+                            # Limit history length
+                            if len(track) > max_history:
+                                track.pop(0)
+                            if len(box_sizes) > max_history:
+                                box_sizes.pop(0)
+                            
+                            # Only show tracking history and direction info when tracking is enabled
+                            if tracking_enabled:
+                                # Draw the tracking line
+                                if len(track) > 1:
+                                    points = np.array(track, dtype=np.int32).reshape((-1, 1, 2))
+                                    cv2.polylines(annotated_frame, [points], isClosed=False,
+                                                color=(230, 230, 230), thickness=2)
+                                
+                                # Calculate direction and speed every 5 frames
+                                if frame_count % 5 == 0 and len(track) > 5 and len(box_sizes) > 5:
+                                    horizontal, vertical, depth, angle = predict_direction(track, box_sizes)
+                                    
+                                    # Calculate speed
+                                    speed_kmh, px_per_frame = calculate_speed(track, fps, pixels_per_meter)
+                                    
+                                    # Store direction and speed data
+                                    direction_history[track_id] = {
+                                        'horizontal': horizontal,
+                                        'vertical': vertical,
+                                        'depth': depth,
+                                        'angle': angle
+                                    }
+                                    
+                                    if speed_kmh is not None:
+                                        speed_history[track_id] = {
+                                            'kmh': speed_kmh,
+                                            'px_per_frame': px_per_frame
+                                        }
+                                
+                                # Draw direction arrow
+                                if track_id in direction_history:
+                                    dir_data = direction_history[track_id]
+                                    if (dir_data['horizontal'] != "Stationary" or 
+                                        dir_data['vertical'] != "Stationary"):
+                                        
+                                        angle = dir_data['angle']
+                                        arrow_start = (int(track[-1][0]), int(track[-1][1]))
+                                        
+                                        if angle is not None:
+                                            arrow_length = 40
+                                            end_x = arrow_start[0] + arrow_length * math.cos(math.radians(angle))
+                                            end_y = arrow_start[1] - arrow_length * math.sin(math.radians(angle))
+                                            arrow_end = (int(end_x), int(end_y))
+                                            
+                                            # Draw direction arrow
+                                            cv2.arrowedLine(annotated_frame, arrow_start, arrow_end,
+                                                        (0, 165, 255), 2, tipLength=0.3)
+                                
+                                # Draw depth movement arrow
+                                if track_id in direction_history:
+                                    depth_dir = direction_history[track_id]['depth']
+                                    if depth_dir != "Same Distance":
+                                        center_x, center_y = int(x), int(y)
+                                        
+                                        if depth_dir == "Toward Camera":
+                                            cv2.arrowedLine(annotated_frame,
+                                                        (center_x, center_y),
+                                                        (center_x, center_y - 40),
+                                                        (255, 0, 255), 2, tipLength=0.3)
+                                        else:  # Away from Camera
+                                            cv2.arrowedLine(annotated_frame,
+                                                        (center_x, center_y),
+                                                        (center_x, center_y + 40),
+                                                        (255, 0, 255), 2, tipLength=0.3)
+                                
+                                # Display information in overlay (only if not using robust tracker)
+                                if not (tracking_enabled and robust_tracker is not None):
+                                    y_position = 35
+                                    
+                                    # Display object ID
+                                    cv2.putText(annotated_frame, f"Object ID: {track_id}", (20, y_position),
+                                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                                    y_position += 20
+                                    
+                                    # Display direction info
+                                    if track_id in direction_history:
+                                        dir_data = direction_history[track_id]
+                                        direction_text = f"Direction: {dir_data['horizontal']} | {dir_data['vertical']}"
+                                        cv2.putText(annotated_frame, direction_text, (20, y_position),
+                                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                                        y_position += 20
+                                        
+                                        depth_text = f"Depth: {dir_data['depth']}"
+                                        cv2.putText(annotated_frame, depth_text, (20, y_position),
+                                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                                        y_position += 20
+                                    
+                                    # Display speed info
+                                    if track_id in speed_history:
+                                        speed_data = speed_history[track_id]
+                                        speed_text = f"Speed: {speed_data['kmh']:.1f} km/h"
+                                        cv2.putText(annotated_frame, speed_text, (20, y_position),
+                                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                            else:
+                                # In detection mode, just display the class name (or object ID)
+                                y_position = 35
+                                cv2.putText(annotated_frame, f"Object ID: {track_id}", (20, y_position),
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
                 
         except Exception as e:
             # If tracking fails, increase error counter and possibly disable tracking
@@ -521,7 +981,13 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
 
         # Display source and tracking information
         source_text = f"Source: {os.path.basename(current_video_path)}"
-        mode_text = "Mode: " + ("Tracking" if tracking_enabled else "Detection only")
+        if tracking_enabled and selected_object_id is not None:
+            if robust_tracker is not None:
+                mode_text = f"Mode: Enhanced Tracking ({robust_tracker.state})"
+            else:
+                mode_text = "Mode: Tracking"
+        else:
+            mode_text = "Mode: Detection"
         frame_text = f"Frame: {frame_index}"
         
         cv2.putText(annotated_frame, source_text, (20, 130),
@@ -540,18 +1006,31 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
         # Update previous frame for next iteration
         prev_frame = frame.copy()
         
-        # Add a slight delay to simulate real-time speed
-        time.sleep(1/fps)  # Sleep to match the video's frame rate
+        # Add a controlled delay to simulate real-time speed
+        target_frame_time = 1.0 / fps  # Target time per frame based on video fps
+        elapsed = time.time() - frame_start_time  # How long processing took
+        
+        # Only sleep if processing was faster than target frame time
+        if elapsed < target_frame_time:
+            sleep_time = target_frame_time - elapsed
+            # Apply a dynamic adjustment to smooth out playback
+            sleep_time = min(sleep_time, 0.1)  # Cap sleep time to avoid excessive delays
+            time.sleep(sleep_time)
+        
+        # Store the current frame and index for pause functionality
+        process_video.current_frame = annotated_frame.copy()
+        process_video.current_frame_index = frame_index
 
-        ret, buffer = cv2.imencode('.jpg', annotated_frame)
+        # Encode the frame with higher quality
+        ret, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
         if not ret:
             continue
         frame_bytes = buffer.tobytes()
-        # Yield a multipart JPEG frame
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
     
     cap.release()
+    process_video.current_frame = None  # Clear the stored frame when video ends
 
 @app.get("/")
 async def index(request: Request):
@@ -561,18 +1040,22 @@ async def index(request: Request):
 @app.get("/video_feed")
 async def video_feed(
     filename: str = Query(..., description="Filename for uploaded video"),
-    tracking: bool = Query(True, description="Enable object tracking"),
-    object_id: Optional[int] = Query(None, description="ID of specific object to track")
+    tracking: bool = Query(False, description="Enable object tracking"),
+    object_id: Optional[int] = Query(None, description="ID of specific object to track"),
+    start_frame: int = Query(0, description="Starting frame index")
 ):
     """Stream video from uploaded file"""
+    print(f"Video feed request: filename={filename}, tracking={tracking}, object_id={object_id}, start_frame={start_frame}")
     return StreamingResponse(
-        process_video(filename, use_tracking=tracking, obj_id=object_id),
+        process_video(filename, use_tracking=tracking, obj_id=object_id, start_frame=start_frame),
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
 @app.post("/upload_video")
 async def upload_video(video: UploadFile = File(...)):
     """Upload a video file for processing"""
+    global track_history, box_size_history, direction_history, speed_history, selected_object_id
+    
     try:
         # Validate file type
         if not video.content_type.startswith("video/"):
@@ -589,6 +1072,12 @@ async def upload_video(video: UploadFile = File(...)):
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(video.file, buffer)
         
+        # Clean up previous videos
+        cleanup_previous_videos(file_path)
+        
+        # Reset tracking data and caches
+        reset_tracking_data()
+        
         # Return success response with the filename for client-side use
         return {"success": True, "filename": filename}
     
@@ -598,20 +1087,228 @@ async def upload_video(video: UploadFile = File(...)):
             content={"success": False, "error": str(e)}
         )
 
-@app.post("/select_object")
-async def select_object(object_id: int = Form(...)):
-    """Set the object ID to track selectively"""
-    global selected_object_id
+def cleanup_previous_videos(current_file_path):
+    """Clean up all videos except the current one"""
+    try:
+        current_file = os.path.basename(str(current_file_path))
+        # Check all files in the upload directory
+        for file in UPLOAD_DIR.glob("*"):
+            if file.is_file() and str(file.name) != current_file:
+                try:
+                    print(f"Removing previous video: {file}")
+                    file.unlink()
+                except Exception as e:
+                    print(f"Failed to delete {file}: {e}")
+        
+        # Report remaining files (should be just the current one)
+        remaining = list(UPLOAD_DIR.glob("*"))
+        print(f"Remaining files in upload directory: {len(remaining)}")
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+
+def reset_tracking_data():
+    """Reset all tracking data and caches"""
+    global track_history, box_size_history, direction_history, speed_history, selected_object_id
+    global frame_count, fps, robust_tracker
     
-    selected_object_id = object_id
-    return {"success": True, "selected_id": object_id}
+    print("Resetting tracking data and caches")
+    
+    # Reset tracking history
+    track_history = defaultdict(list)
+    box_size_history = defaultdict(list)
+    direction_history = {}
+    speed_history = {}
+    
+    # Reset frame counter
+    frame_count = 0
+    
+    # Clear selected object
+    selected_object_id = None
+    
+    # Clear robust tracker
+    robust_tracker = None
+    
+    # Reset any stored frames in the process_video function
+    if hasattr(process_video, 'current_frame'):
+        process_video.current_frame = None
+    
+    if hasattr(process_video, 'current_frame_index'):
+        process_video.current_frame_index = 0
+    
+    # Force garbage collection to free memory
+    import gc
+    gc.collect()
+    
+    # Clear GPU cache if available
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("Cleared GPU cache")
+    
+    print("All tracking data and caches have been reset")
+
+@app.post("/select_object")
+async def select_object(bbox: Dict = Body(...)):
+    """Set the object to track based on initial bounding box"""
+    global selected_object_id, model, current_video_path, robust_tracker
+    
+    try:
+        # Convert relative coordinates to absolute
+        rel_bbox = BoundingBox(**bbox['bbox'])
+        
+        # Convert to absolute pixel coordinates
+        abs_x1 = int(rel_bbox.x * STD_WIDTH)
+        abs_y1 = int(rel_bbox.y * STD_HEIGHT)
+        abs_x2 = int((rel_bbox.x + rel_bbox.width) * STD_WIDTH)
+        abs_y2 = int((rel_bbox.y + rel_bbox.height) * STD_HEIGHT)
+        
+        # Get current frame from video to run detection
+        if not current_video_path or not os.path.exists(current_video_path):
+            return {"success": False, "error": "No active video loaded"}
+        
+        cap = cv2.VideoCapture(current_video_path)
+        success, frame = cap.read()
+        cap.release()
+        
+        if not success:
+            return {"success": False, "error": "Could not read video frame"}
+        
+        # Resize frame to standard dimensions
+        frame = cv2.resize(frame, (STD_WIDTH, STD_HEIGHT), interpolation=cv2.INTER_AREA)
+        
+        # Run detector on current frame
+        try:
+            results = model(frame)
+            print(f"Detection found {len(results[0].boxes.data)} objects")
+            
+            if not hasattr(results[0], 'boxes') or len(results[0].boxes.data) == 0:
+                print("No objects detected in frame")
+                # If no objects detected, use the user's selection directly
+                selected_object_id = {
+                    'bbox': [abs_x1, abs_y1, abs_x2, abs_y2]
+                }
+                
+                # Create bounding box for tracker in xywh format
+                w = abs_x2 - abs_x1
+                h = abs_y2 - abs_y1
+                center_x = abs_x1 + w/2
+                center_y = abs_y1 + h/2
+                
+                # Initialize robust tracker with manual selection
+                robust_tracker = RobustObjectTracker(1, [center_x, center_y, w, h], frame)
+                print("Initialized robust tracker with manual selection")
+                
+                return {"success": True, "selected_id": 1, "method": "manual_selection"}
+            
+            # Get all detected boxes
+            boxes = results[0].boxes.xyxy.cpu().numpy()  # [x1, y1, x2, y2] format
+            confs = results[0].boxes.conf.cpu().numpy()
+            
+            # Calculate IoU (Intersection over Union) with user's selection
+            best_iou = 0
+            best_idx = -1
+            user_box = [abs_x1, abs_y1, abs_x2, abs_y2]
+            user_box_area = (abs_x2 - abs_x1) * (abs_y2 - abs_y1)
+            
+            for i, box in enumerate(boxes):
+                # Calculate intersection
+                ix1 = max(box[0], user_box[0])
+                iy1 = max(box[1], user_box[1])
+                ix2 = min(box[2], user_box[2])
+                iy2 = min(box[3], user_box[3])
+                
+                if ix2 < ix1 or iy2 < iy1:
+                    # No intersection
+                    continue
+                
+                intersection_area = (ix2 - ix1) * (iy2 - iy1)
+                box_area = (box[2] - box[0]) * (box[3] - box[1])
+                union_area = box_area + user_box_area - intersection_area
+                iou = intersection_area / union_area
+                
+                # If we have a better match, update
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = i
+            
+            # If we found a good match
+            if best_idx >= 0 and best_iou > 0.1:  # Threshold can be adjusted
+                print(f"Found matching object with IoU: {best_iou:.2f}")
+                best_box = boxes[best_idx]
+                
+                # Create bounding box for tracker in xywh format
+                w = best_box[2] - best_box[0]
+                h = best_box[3] - best_box[1]
+                center_x = best_box[0] + w/2
+                center_y = best_box[1] + h/2
+                
+                # Use the detected box for improved tracking
+                selected_object_id = {
+                    'bbox': [float(best_box[0]), float(best_box[1]), 
+                            float(best_box[2]), float(best_box[3])]
+                }
+                
+                # Initialize robust tracker with detected box
+                robust_tracker = RobustObjectTracker(int(best_idx), 
+                                                    [center_x, center_y, w, h], 
+                                                    frame)
+                print(f"Initialized robust tracker with detection-refined box")
+                
+                return {"success": True, "selected_id": int(best_idx), 
+                        "method": "detector_refined", "confidence": float(confs[best_idx]),
+                        "iou": float(best_iou)}
+            else:
+                print("No matching objects found, using manual selection")
+                # Fallback to user's selection
+                selected_object_id = {
+                    'bbox': [abs_x1, abs_y1, abs_x2, abs_y2]
+                }
+                
+                # Create bounding box for tracker in xywh format
+                w = abs_x2 - abs_x1
+                h = abs_y2 - abs_y1
+                center_x = abs_x1 + w/2
+                center_y = abs_y1 + h/2
+                
+                # Initialize robust tracker with manual selection
+                robust_tracker = RobustObjectTracker(1, [center_x, center_y, w, h], frame)
+                print("Initialized robust tracker with manual selection")
+                
+                return {"success": True, "selected_id": 1, "method": "manual_selection"}
+            
+        except Exception as detect_err:
+            print(f"Error running detector: {detect_err}")
+            # Fallback to user's selection on detection error
+            selected_object_id = {
+                'bbox': [abs_x1, abs_y1, abs_x2, abs_y2]
+            }
+            
+            # Create bounding box for tracker in xywh format
+            w = abs_x2 - abs_x1
+            h = abs_y2 - abs_y1
+            center_x = abs_x1 + w/2
+            center_y = abs_y1 + h/2
+            
+            # Initialize robust tracker with manual selection even after error
+            try:
+                robust_tracker = RobustObjectTracker(1, [center_x, center_y, w, h], frame)
+                print("Initialized robust tracker with manual selection after detection error")
+            except Exception as tracker_err:
+                print(f"Failed to initialize tracker: {tracker_err}")
+            
+            return {"success": True, "selected_id": 1, "method": "manual_selection"}
+            
+    except Exception as e:
+        print(f"Error in select_object: {e}")
+        return {"success": False, "error": str(e)}
 
 @app.post("/clear_selection")
 async def clear_selection():
     """Clear the selected object ID"""
-    global selected_object_id
+    global selected_object_id, robust_tracker
     
     selected_object_id = None
+    robust_tracker = None
+    print("Cleared object selection and robust tracker")
     return {"success": True}
 
 @app.get("/shutdown")
@@ -641,15 +1338,24 @@ async def startup_event():
     print("GPU Real-time Object Tracking Server")
     print("="*50)
     
-    # Log system information
-    print("\nSystem Information:")
+    # Enhanced GPU diagnostics
+    print("\nDetailed GPU Diagnostics:")
     if torch.cuda.is_available():
         print(f"CUDA Available: Yes")
         print(f"CUDA Version: {torch.version.cuda}")
         print(f"GPU Device: {torch.cuda.get_device_name(0)}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        print(f"Current GPU Memory Usage: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
+        print(f"GPU Memory Cached: {torch.cuda.memory_reserved(0) / 1e9:.2f} GB")
+        
+        # Verify model is on GPU
+        if hasattr(model, 'model'):
+            print(f"Model Device: {next(model.model.parameters()).device}")
+        else:
+            print("Warning: Could not determine model device")
     else:
         print("CUDA Available: No (Running in CPU mode - performance will be limited)")
+        print("Warning: Model is running on CPU, which will be significantly slower")
     
     print(f"\nPython Version: {sys.version}")
     print(f"PyTorch Version: {torch.__version__}")
@@ -708,6 +1414,136 @@ async def cleanup():
             print(f"Warning: {len(remaining)} files could not be deleted")
         else:
             print("All uploaded files cleaned up successfully")
+
+@app.get("/video_frame")
+async def video_frame(
+    filename: str = Query(..., description="Filename for uploaded video"),
+    frame: str = Query("first", description="Which frame to return (first/current)")
+):
+    """Return a single frame from the video"""
+    try:
+        video_path = str(UPLOAD_DIR / filename)
+        if not os.path.exists(video_path):
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Video file not found"}
+            )
+        
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Could not open video"}
+            )
+
+        # Get video orientation from metadata
+        rotation = 0
+        try:
+            # Try to get rotation from video metadata
+            rotation = int(cap.get(cv2.CAP_PROP_ORIENTATION_META))
+            print(f"Video frame rotation metadata: {rotation} degrees")
+        except:
+            # If metadata is not available, try to detect rotation from dimensions
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if width < height:  # Portrait video
+                rotation = 90
+            print(f"No rotation metadata found, detected rotation: {rotation} degrees")
+        
+        # Get frame based on request
+        if frame == "first":
+            # Always get first frame
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        elif frame == "current" and hasattr(process_video, 'current_frame'):
+            # Get the last processed frame if available
+            frame_data = process_video.current_frame
+            if frame_data is not None:
+                print(f"Returning cached current frame at index {process_video.current_frame_index}")
+                _, buffer = cv2.imencode('.jpg', frame_data, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                frame_bytes = buffer.tobytes()
+                cap.release()
+                return Response(content=frame_bytes, media_type="image/jpeg")
+        
+        # Read and return the frame
+        success, frame = cap.read()
+        cap.release()
+        
+        if not success:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Could not read frame"}
+            )
+
+        # Apply rotation if needed
+        if rotation != 0:
+            # Calculate rotation matrix
+            center = (frame.shape[1] // 2, frame.shape[0] // 2)
+            # Invert rotation for display
+            rotation_matrix = cv2.getRotationMatrix2D(center, -rotation, 1.0)
+            
+            # Get rotated dimensions
+            cos = np.abs(rotation_matrix[0, 0])
+            sin = np.abs(rotation_matrix[0, 1])
+            new_width = int((frame.shape[0] * sin) + (frame.shape[1] * cos))
+            new_height = int((frame.shape[0] * cos) + (frame.shape[1] * sin))
+            
+            # Adjust translation
+            rotation_matrix[0, 2] += (new_width / 2) - (frame.shape[1] / 2)
+            rotation_matrix[1, 2] += (new_height / 2) - (frame.shape[0] / 2)
+            
+            # Apply rotation with adjusted dimensions
+            frame = cv2.warpAffine(frame, rotation_matrix, (new_width, new_height))
+        
+        # Resize frame to standard dimensions while maintaining aspect ratio
+        target_height = STD_HEIGHT
+        target_width = STD_WIDTH
+        
+        # Calculate aspect ratio
+        aspect_ratio = frame.shape[1] / frame.shape[0]
+        target_aspect = target_width / target_height
+        
+        if aspect_ratio > target_aspect:
+            # Image is wider than target
+            new_width = target_width
+            new_height = int(target_width / aspect_ratio)
+        else:
+            # Image is taller than target
+            new_height = target_height
+            new_width = int(target_height * aspect_ratio)
+        
+        # Resize frame
+        frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        # Create black canvas of target size
+        canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+        
+        # Calculate position to center the frame
+        y_offset = (target_height - new_height) // 2
+        x_offset = (target_width - new_width) // 2
+        
+        # Place frame in center of canvas
+        canvas[y_offset:y_offset + new_height, x_offset:x_offset + new_width] = frame
+        
+        # Convert frame to JPEG with high quality
+        _, buffer = cv2.imencode('.jpg', canvas, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        frame_bytes = buffer.tobytes()
+        
+        return Response(content=frame_bytes, media_type="image/jpeg")
+        
+    except Exception as e:
+        print(f"Error in video_frame: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+@app.get("/current_frame_index")
+async def current_frame_index():
+    """Return the current frame index for resuming videos"""
+    if hasattr(process_video, 'current_frame_index'):
+        return {"success": True, "frame_index": process_video.current_frame_index}
+    else:
+        return {"success": False, "frame_index": 0}
 
 if __name__ == "__main__":
     # Run the app on all network interfaces on port 8000

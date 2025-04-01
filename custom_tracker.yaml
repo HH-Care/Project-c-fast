@@ -1,0 +1,31 @@
+# BOTSORT tracker configuration (Enhanced version)
+botsort:
+  track_high_thresh: 0.6    # High confidence threshold for detection
+  track_low_thresh: 0.3     # Low confidence threshold for track keeping
+  new_track_thresh: 0.7     # Threshold for new track initiation
+  match_thresh: 0.8         # Matching threshold for tracking
+  track_buffer: 60          # Number of frames to buffer when track is lost
+  frame_rate: 30            # FPS (matches video processing setting)
+  proximity_thresh: 0.5     # Proximity threshold for association
+  appearance_thresh: 0.25   # Appearance similarity threshold
+  with_reid: True           # Enable re-identification model
+  cmc_method: "sparseOptFlow" # Camera motion compensation method
+  mc_lambda: 0.99           # Motion compensation lambda
+  gmc_method: "sparseOptFlow" # Global motion compensation method
+
+# BYTETracker configuration (Alternative)
+bytetrack:
+  track_thresh: 0.6         # Detection confidence threshold
+  match_thresh: 0.8         # Matching threshold for tracking
+  track_buffer: 60          # Buffer size for track history
+  frame_rate: 30            # FPS
+  min_box_area: 100         # Minimum bounding box area
+  mot20: False              # MOT20 dataset format
+
+# Common parameters
+speed_diff_factor: 0.9      # Speed difference threshold
+max_bbox_overlap: 0.7       # Maximum bounding box overlap
+enable_checks: True         # Enable consistency checks
+use_optical_flow: True      # Use optical flow for motion prediction
+appearance_weight: 0.5      # Weight for appearance features
+motion_weight: 0.5          # Weight for motion features 
