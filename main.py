@@ -2291,6 +2291,26 @@ async def resume_webcam():
     print("Webcam stream resumed")
     return {"success": True, "message": "Webcam resumed"}
 
+@app.post("/webcam_frame_upload")
+async def webcam_frame_upload(frame_data: UploadFile = File(...)):
+    """Receive webcam frame from client browser"""
+    global webcam_frame_buffer
+    
+    try:
+        contents = await frame_data.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is not None:
+            with webcam_lock:
+                webcam_frame_buffer = frame.copy()
+            return {"success": True}
+        else:
+            return {"success": False, "message": "Could not decode image"}
+    except Exception as e:
+        print(f"Error processing uploaded frame: {e}")
+        return {"success": False, "message": str(e)}
+
 if __name__ == "__main__":
     # Run the app on all network interfaces on port 8000
     uvicorn.run(app, host="0.0.0.0", port=8000)

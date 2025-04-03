@@ -33,6 +33,6 @@ fi
 
 # Start the application
 echo "Starting server on port 8000..."
-python main.py
+python -c "import uvicorn; import main; uvicorn.run(main.app, host='0.0.0.0', port=8000)"
 
 echo "Server stopped." 
