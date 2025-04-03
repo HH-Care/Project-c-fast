@@ -49,6 +49,7 @@ webcam_source = 0  # Default camera
 webcam_frame_buffer = None
 webcam_lock = threading.Lock()
 webcam_paused = False  # Flag to pause webcam processing
+just_resumed = False  # Flag to indicate webcam just resumed from pause
 
 # Standard dimensions for video processing
 STD_WIDTH = 1280
@@ -237,7 +238,87 @@ class RobustObjectTracker:
             return None, None, 0
             
         return best_match_id, best_match_box, best_score
+    
+    def get_position(self):
+        """Get current position and size (x, y, w, h)"""
+        if self.last_position is None or self.last_size is None:
+            return (0, 0, 0, 0)  # Default if not initialized
         
+        x, y = self.last_position
+        w, h = self.last_size
+        return (x, y, w, h)
+    
+    def update_webcam(self, frame):
+        """Simple update for webcam mode - just run YOLO to get detections"""
+        try:
+            # Run YOLO detection on the frame
+            results = model(frame)
+            
+            # Process the detections
+            if hasattr(results[0], 'boxes') and len(results[0].boxes) > 0:
+                # Get all boxes
+                boxes = results[0].boxes.xywh.cpu().numpy()  # center_x, center_y, width, height
+                confidences = results[0].boxes.conf.cpu().numpy()
+                
+                # Find the best match based on position overlap with our current box
+                if self.last_position is not None and self.last_size is not None:
+                    best_box_idx = -1
+                    best_overlap = -1
+                    
+                    curr_x, curr_y = self.last_position
+                    curr_w, curr_h = self.last_size
+                    curr_area = curr_w * curr_h
+                    
+                    for i, box in enumerate(boxes):
+                        x, y, w, h = box
+                        
+                        # Simple IoU calculation
+                        x1_b1, y1_b1 = curr_x - curr_w/2, curr_y - curr_h/2
+                        x2_b1, y2_b1 = curr_x + curr_w/2, curr_y + curr_h/2
+                        
+                        x1_b2, y1_b2 = x - w/2, y - h/2
+                        x2_b2, y2_b2 = x + w/2, y + h/2
+                        
+                        # Calculate intersection
+                        x_left = max(x1_b1, x1_b2)
+                        y_top = max(y1_b1, y1_b2)
+                        x_right = min(x2_b1, x2_b2)
+                        y_bottom = min(y2_b1, y2_b2)
+                        
+                        if x_right < x_left or y_bottom < y_top:
+                            # No overlap
+                            continue
+                        
+                        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+                        box_area = w * h
+                        union = curr_area + box_area - intersection_area
+                        overlap = intersection_area / union if union > 0 else 0
+                        
+                        if overlap > best_overlap:
+                            best_overlap = overlap
+                            best_box_idx = i
+                
+                    # If we found a good match, update position
+                    if best_box_idx >= 0 and best_overlap > 0.1:
+                        x, y, w, h = boxes[best_box_idx]
+                        self.update_velocity((x, y))
+                        self.last_position = (x, y)
+                        self.last_size = (w, h)
+                        return True, (x, y, w, h)
+            
+            # If we got here, no good match was found
+            # Try to predict position based on velocity
+            predicted_pos = self.predict_position()
+            if predicted_pos is not None:
+                self.last_position = predicted_pos
+                return True, (predicted_pos[0], predicted_pos[1], self.last_size[0], self.last_size[1])
+            
+            return False, self.get_position()
+            
+        except Exception as e:
+            print(f"Error in robust tracker update: {e}")
+            return False, self.get_position()
+    
     def update(self, frame, boxes, ids, frame_count):
         """Update tracker with new detections"""
         self.lost_frames += 1
@@ -1157,7 +1238,7 @@ def reset_tracking_data():
 @app.post("/select_object")
 async def select_object(bbox: Dict = Body(...)):
     """Set the object to track based on initial bounding box"""
-    global selected_object_id, model, current_video_path, robust_tracker
+    global selected_object_id, model, current_video_path, robust_tracker, webcam_frame_buffer
     
     try:
         # Convert relative coordinates to absolute
@@ -1169,19 +1250,28 @@ async def select_object(bbox: Dict = Body(...)):
         abs_x2 = int((rel_bbox.x + rel_bbox.width) * STD_WIDTH)
         abs_y2 = int((rel_bbox.y + rel_bbox.height) * STD_HEIGHT)
         
-        # Get current frame from video to run detection
-        if not current_video_path or not os.path.exists(current_video_path):
-            return {"success": False, "error": "No active video loaded"}
+        # Get current frame - either from webcam buffer or video file
+        frame = None
         
-        cap = cv2.VideoCapture(current_video_path)
-        success, frame = cap.read()
-        cap.release()
-        
-        if not success:
-            return {"success": False, "error": "Could not read video frame"}
-        
-        # Resize frame to standard dimensions
-        frame = cv2.resize(frame, (STD_WIDTH, STD_HEIGHT), interpolation=cv2.INTER_AREA)
+        # First check if we have a webcam frame buffer
+        if webcam_active and webcam_frame_buffer is not None:
+            print("Using webcam frame for object selection")
+            frame = webcam_frame_buffer.copy()
+            frame = cv2.resize(frame, (STD_WIDTH, STD_HEIGHT), interpolation=cv2.INTER_AREA)
+        # Otherwise try to get frame from video file
+        elif current_video_path and os.path.exists(current_video_path):
+            print("Using video frame for object selection")
+            cap = cv2.VideoCapture(current_video_path)
+            success, frame = cap.read()
+            cap.release()
+            
+            if not success:
+                return {"success": False, "error": "Could not read video frame"}
+            
+            # Resize frame to standard dimensions
+            frame = cv2.resize(frame, (STD_WIDTH, STD_HEIGHT), interpolation=cv2.INTER_AREA)
+        else:
+            return {"success": False, "error": "No active video or webcam stream loaded"}
         
         # Run detector on current frame
         try:
@@ -1802,7 +1892,7 @@ async def get_available_cameras():
 def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = None):
     """Process the webcam stream and yield frames with detection/tracking"""
     global track_history, box_size_history, direction_history, speed_history, selected_object_id, robust_tracker
-    global webcam_paused, webcam_frame_buffer
+    global webcam_paused, webcam_frame_buffer, just_resumed
     
     # Set selected object ID from parameter if provided
     if obj_id is not None:
@@ -1811,8 +1901,17 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
     # Initialize tracking
     tracking_enabled = use_tracking
     
+    # Force tracking enabled if we have a selected object
+    if selected_object_id is not None:
+        tracking_enabled = True
+        print(f"Webcam tracking forced enabled for object ID: {selected_object_id}")
+    
     # For optical flow
     prev_frame = None
+    
+    # Frame buffer for smoother tracking (keeps the last few frames)
+    frame_buffer = []
+    BUFFER_SIZE = 3
     
     # Performance monitoring variables
     frame_times = []
@@ -1824,6 +1923,9 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
     
     # Store current frame for pause functionality
     last_sent_frame = None
+    
+    # Reset tracking cache only once at stream start
+    reset_tracking_cache()
     
     while running and webcam_active:
         # If paused, use the last frame instead of getting a new one
@@ -1850,7 +1952,13 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                 # If no frame is available yet, wait
                 time.sleep(0.03)
                 continue
-                
+        
+        # Set flag if we just resumed from pause
+        if just_resumed:
+            print("Webcam just resumed - maintaining tracking history")
+            just_resumed = False  # Reset the flag
+            # We don't reset the tracking cache here to maintain trajectory
+        
         # Get latest frame from buffer
         frame = get_webcam_frame()
         if frame is None:
@@ -1864,25 +1972,110 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
         # Resize frame to standard dimensions to ensure consistent processing
         frame = cv2.resize(frame, (STD_WIDTH, STD_HEIGHT), interpolation=cv2.INTER_AREA)
         
+        # Add to frame buffer for stabilization
+        frame_buffer.append(frame.copy())
+        if len(frame_buffer) > BUFFER_SIZE:
+            frame_buffer.pop(0)
+        
         # Store for optical flow consistency check
         if prev_frame is None:
             prev_frame = frame.copy()
-            reset_tracking_cache()
             continue
             
         # Check if frame is similar enough to previous for optical flow
         frame_diff = cv2.absdiff(frame, prev_frame)
         diff_mean = np.mean(frame_diff)
         
-        # If frames are too different, reset tracking to avoid optical flow errors
-        if diff_mean > 50 and tracking_enabled:  # Threshold for significant change
-            print(f"Warning: Large frame difference detected ({diff_mean:.1f}). Resetting tracking.")
+        # If frames are too different, reset tracking ONLY if the difference is extreme
+        # This makes tracking more persistent and stable for webcam
+        if diff_mean > 80 and tracking_enabled:  # Higher threshold for webcam mode
+            print(f"Warning: Very large frame difference detected ({diff_mean:.1f}). Resetting tracking.")
             reset_tracking_cache()
         
         # Run detection/tracking on the frame
         try:
             # Run detection or tracking based on settings
             if tracking_enabled:
+                # Use the robust tracker if it exists
+                if robust_tracker is not None and selected_object_id is not None:
+                    # Update with the current frame (custom tracking)
+                    success, pos = robust_tracker.update_webcam(frame)
+                    if success:
+                        # Extract position
+                        x, y, w, h = pos
+                        
+                        # Add to tracking history
+                        track_id = 1  # Use a fixed track ID for robust tracker
+                        
+                        # Update trajectory
+                        track_history[track_id].append((float(x), float(y)))
+                        box_size_history[track_id].append((float(w), float(h)))
+                        
+                        # Limit trajectory history 
+                        if len(track_history[track_id]) > 90:  # Keep more points for webcam mode
+                            track_history[track_id].pop(0)
+                            box_size_history[track_id].pop(0)
+                        
+                        # Draw bounding box and track ID
+                        x1, y1 = int(x - w/2), int(y - h/2)
+                        x2, y2 = int(x + w/2), int(y + h/2)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                        cv2.putText(frame, f"ID:{track_id}", (x1, y1 - 10), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                        
+                        # Draw trajectory line - make it more prominent
+                        if len(track_history[track_id]) > 1:
+                            points = np.array(track_history[track_id], dtype=np.int32).reshape((-1, 1, 2))
+                            cv2.polylines(frame, [points], False, (0, 255, 255), 2)
+                            
+                            # Calculate direction if we have enough history
+                            if len(track_history[track_id]) >= 5:
+                                # Use the last 5 points to calculate direction
+                                last_points = track_history[track_id][-5:]
+                                if len(last_points) >= 2:
+                                    start_x, start_y = last_points[0]
+                                    end_x, end_y = last_points[-1]
+                                    
+                                    # Calculate direction vector
+                                    dir_x = end_x - start_x
+                                    dir_y = end_y - start_y
+                                    
+                                    # Calculate direction angle in degrees
+                                    angle = math.degrees(math.atan2(dir_y, dir_x))
+                                    
+                                    # Convert to compass direction
+                                    if angle < 0:
+                                        angle += 360
+                                        
+                                    # Map angle to cardinal direction
+                                    directions = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+                                    index = int((angle + 22.5) % 360 / 45)
+                                    cardinal = directions[index]
+                                    
+                                    # Store direction
+                                    direction_history[track_id] = cardinal
+                                    
+                                    # Calculate speed (pixels per frame)
+                                    distance = math.sqrt(dir_x**2 + dir_y**2)
+                                    frames = len(last_points) - 1
+                                    speed_px = distance / frames if frames > 0 else 0
+                                    
+                                    # Store speed
+                                    speed_history[track_id] = speed_px
+                                    
+                                    # Display direction and speed more prominently
+                                    info_text = f"Dir: {cardinal}, Speed: {speed_px:.1f}"
+                                    cv2.putText(frame, info_text, (x1, y2 + 20), 
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                                    
+                                    # Draw direction arrow
+                                    arrow_length = 40
+                                    arrow_end_x = int(x + dir_x * arrow_length / distance if distance > 0 else x)
+                                    arrow_end_y = int(y + dir_y * arrow_length / distance if distance > 0 else y)
+                                    cv2.arrowedLine(frame, (int(x), int(y)), (arrow_end_x, arrow_end_y), 
+                                                 (0, 255, 255), 2, tipLength=0.3)
+                    
+                # Also run YOLOv8 tracking to detect other objects
                 results = model.track(frame, persist=True)
             else:
                 results = model(frame)
@@ -1906,6 +2099,35 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                     cls = int(classes[i])
                     conf = confidences[i]
                     
+                    # Skip this box if we're already tracking with the robust tracker
+                    if robust_tracker is not None and selected_object_id is not None:
+                        # If the robust tracker is active, skip YOLOv8 visualization for this object
+                        # to avoid double drawing
+                        # Simple IOU check to avoid duplicate boxes
+                        x1, y1 = int(x - w/2), int(y - h/2)
+                        x2, y2 = int(x + w/2), int(y + h/2)
+                        rob_x, rob_y, rob_w, rob_h = robust_tracker.get_position()
+                        rob_x1, rob_y1 = int(rob_x - rob_w/2), int(rob_y - rob_h/2)
+                        rob_x2, rob_y2 = int(rob_x + rob_w/2), int(rob_y + rob_h/2)
+                        
+                        # Calculate intersection
+                        ix1 = max(x1, rob_x1)
+                        iy1 = max(y1, rob_y1)
+                        ix2 = min(x2, rob_x2)
+                        iy2 = min(y2, rob_y2)
+                        
+                        if ix2 > ix1 and iy2 > iy1:
+                            # Boxes overlap, calculate IoU
+                            box_area = (x2 - x1) * (y2 - y1)
+                            rob_area = (rob_x2 - rob_x1) * (rob_y2 - rob_y1)
+                            intersection = (ix2 - ix1) * (iy2 - iy1)
+                            union = box_area + rob_area - intersection
+                            iou = intersection / union if union > 0 else 0
+                            
+                            if iou > 0.5:
+                                # Skip this box - it's likely the same object
+                                continue
+                    
                     # Draw bounding box
                     x1, y1 = int(x - w/2), int(y - h/2)
                     x2, y2 = int(x + w/2), int(y + h/2)
@@ -1928,7 +2150,7 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                         
                         # If this is the specific object we're tracking, highlight it
-                        if selected_object_id is not None and track_id == selected_object_id:
+                        if selected_object_id is not None and track_id == selected_object_id and robust_tracker is None:
                             # Highlight selected object
                             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
                             
@@ -1937,7 +2159,7 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                             box_size_history[track_id].append((float(w), float(h)))
                             
                             # Limit trajectory history
-                            if len(track_history[track_id]) > 60:  # keep last 60 points
+                            if len(track_history[track_id]) > 90:  # Keep more points for webcam mode
                                 track_history[track_id].pop(0)
                                 box_size_history[track_id].pop(0)
                                 
@@ -1984,6 +2206,13 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                                     info_text = f"Dir: {cardinal}, Speed: {speed_px:.1f}"
                                     cv2.putText(frame, info_text, (x1, y2 + 20), 
                                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                                    
+                                    # Draw direction arrow
+                                    arrow_length = 40
+                                    arrow_end_x = int(x + dir_x * arrow_length / distance if distance > 0 else x)
+                                    arrow_end_y = int(y + dir_y * arrow_length / distance if distance > 0 else y)
+                                    cv2.arrowedLine(frame, (int(x), int(y)), (arrow_end_x, arrow_end_y), 
+                                                 (0, 255, 255), 2, tipLength=0.3)
                         else:
                             # Regular box for other tracked objects
                             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -2052,12 +2281,13 @@ async def pause_webcam():
 @app.post("/resume_webcam")
 async def resume_webcam():
     """Resume webcam streaming after pause"""
-    global webcam_paused
+    global webcam_paused, just_resumed
     
     if not webcam_active:
         return {"success": False, "message": "No active webcam to resume"}
     
     webcam_paused = False
+    just_resumed = True  # Set flag to properly handle tracking after resume
     print("Webcam stream resumed")
     return {"success": True, "message": "Webcam resumed"}
 
