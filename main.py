@@ -48,6 +48,7 @@ webcam_thread = None
 webcam_source = 0  # Default camera
 webcam_frame_buffer = None
 webcam_lock = threading.Lock()
+webcam_paused = False  # Flag to pause webcam processing
 
 # Standard dimensions for video processing
 STD_WIDTH = 1280
@@ -1801,6 +1802,7 @@ async def get_available_cameras():
 def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = None):
     """Process the webcam stream and yield frames with detection/tracking"""
     global track_history, box_size_history, direction_history, speed_history, selected_object_id, robust_tracker
+    global webcam_paused, webcam_frame_buffer
     
     # Set selected object ID from parameter if provided
     if obj_id is not None:
@@ -1820,7 +1822,35 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
     # Initialize frame counter
     frame_count = 0
     
+    # Store current frame for pause functionality
+    last_sent_frame = None
+    
     while running and webcam_active:
+        # If paused, use the last frame instead of getting a new one
+        if webcam_paused:
+            if last_sent_frame is not None:
+                # Use the last frame we sent
+                frame = last_sent_frame.copy()
+                # Add a "PAUSED" indicator to the frame
+                cv2.putText(frame, "PAUSED", (STD_WIDTH//2 - 80, STD_HEIGHT//2), 
+                         cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+                
+                # Encode frame to JPEG
+                _, buffer = cv2.imencode('.jpg', frame)
+                frame_bytes = buffer.tobytes()
+                
+                # Yield the frame
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                
+                # Slow down when paused to reduce CPU usage
+                time.sleep(0.1)
+                continue
+            else:
+                # If no frame is available yet, wait
+                time.sleep(0.03)
+                continue
+                
         # Get latest frame from buffer
         frame = get_webcam_frame()
         if frame is None:
@@ -1858,7 +1888,113 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                 results = model(frame)
                 
             # Process results for visualization
-            # (Processing code is common between webcam and video functions)
+            # Get bounding boxes, classes and tracking IDs
+            if hasattr(results[0], 'boxes'):
+                # Process boxes - unified format across detection and tracking
+                boxes = results[0].boxes.xywh.cpu().numpy()  # center_x, center_y, width, height
+                classes = results[0].boxes.cls.cpu().numpy()
+                confidences = results[0].boxes.conf.cpu().numpy()
+                
+                # Check if tracking IDs are available
+                track_ids = None
+                if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None:
+                    track_ids = results[0].boxes.id.cpu().numpy()
+                    
+                # Draw boxes and tracking information
+                for i, box in enumerate(boxes):
+                    x, y, w, h = box
+                    cls = int(classes[i])
+                    conf = confidences[i]
+                    
+                    # Draw bounding box
+                    x1, y1 = int(x - w/2), int(y - h/2)
+                    x2, y2 = int(x + w/2), int(y + h/2)
+                    
+                    # Calculate color based on class
+                    color = (0, 255, 0)  # Default green
+                    
+                    # If we have a track ID, use it for coloring and tracking
+                    if track_ids is not None:
+                        track_id = int(track_ids[i])
+                        
+                        # Generate consistent color for this ID
+                        color_r = (track_id * 5) % 255
+                        color_g = (track_id * 10) % 255
+                        color_b = (track_id * 20) % 255
+                        color = (color_b, color_g, color_r)
+                        
+                        # Draw ID on the box
+                        cv2.putText(frame, f"ID:{track_id}", (x1, y1 - 10), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        
+                        # If this is the specific object we're tracking, highlight it
+                        if selected_object_id is not None and track_id == selected_object_id:
+                            # Highlight selected object
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                            
+                            # Draw trajectory
+                            track_history[track_id].append((float(x), float(y)))
+                            box_size_history[track_id].append((float(w), float(h)))
+                            
+                            # Limit trajectory history
+                            if len(track_history[track_id]) > 60:  # keep last 60 points
+                                track_history[track_id].pop(0)
+                                box_size_history[track_id].pop(0)
+                                
+                            # Draw trajectory line
+                            points = np.array(track_history[track_id], dtype=np.int32).reshape((-1, 1, 2))
+                            cv2.polylines(frame, [points], False, (0, 255, 255), 2)
+                            
+                            # Calculate direction if we have enough history
+                            if len(track_history[track_id]) >= 5:
+                                # Use the last 5 points to calculate direction
+                                last_points = track_history[track_id][-5:]
+                                if len(last_points) >= 2:
+                                    start_x, start_y = last_points[0]
+                                    end_x, end_y = last_points[-1]
+                                    
+                                    # Calculate direction vector
+                                    dir_x = end_x - start_x
+                                    dir_y = end_y - start_y
+                                    
+                                    # Calculate direction angle in degrees
+                                    angle = math.degrees(math.atan2(dir_y, dir_x))
+                                    
+                                    # Convert to compass direction
+                                    if angle < 0:
+                                        angle += 360
+                                        
+                                    # Map angle to cardinal direction
+                                    directions = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+                                    index = int((angle + 22.5) % 360 / 45)
+                                    cardinal = directions[index]
+                                    
+                                    # Store direction
+                                    direction_history[track_id] = cardinal
+                                    
+                                    # Calculate speed (pixels per frame)
+                                    distance = math.sqrt(dir_x**2 + dir_y**2)
+                                    frames = len(last_points) - 1
+                                    speed_px = distance / frames if frames > 0 else 0
+                                    
+                                    # Store speed
+                                    speed_history[track_id] = speed_px
+                                    
+                                    # Display direction and speed
+                                    info_text = f"Dir: {cardinal}, Speed: {speed_px:.1f}"
+                                    cv2.putText(frame, info_text, (x1, y2 + 20), 
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                        else:
+                            # Regular box for other tracked objects
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    else:
+                        # Just draw regular detection boxes
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        
+                        # Display class and confidence
+                        label = f"Class:{cls}"
+                        cv2.putText(frame, label, (x1, y1 - 10), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
             # Calculate FPS
             frame_time = time.time() - frame_start_time
@@ -1880,6 +2016,9 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
             # Store the previous frame for optical flow
             prev_frame = frame.copy()
             
+            # Store the current frame for pause functionality
+            last_sent_frame = frame.copy()
+            
             # Encode frame to JPEG
             _, buffer = cv2.imencode('.jpg', frame)
             frame_bytes = buffer.tobytes()
@@ -1897,6 +2036,30 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
             traceback.print_exc()
             # Brief pause to prevent excessive error messages
             time.sleep(0.1)
+
+@app.post("/pause_webcam")
+async def pause_webcam():
+    """Pause webcam streaming without stopping the camera"""
+    global webcam_paused
+    
+    if not webcam_active:
+        return {"success": False, "message": "No active webcam to pause"}
+    
+    webcam_paused = True
+    print("Webcam stream paused")
+    return {"success": True, "message": "Webcam paused"}
+
+@app.post("/resume_webcam")
+async def resume_webcam():
+    """Resume webcam streaming after pause"""
+    global webcam_paused
+    
+    if not webcam_active:
+        return {"success": False, "message": "No active webcam to resume"}
+    
+    webcam_paused = False
+    print("Webcam stream resumed")
+    return {"success": True, "message": "Webcam resumed"}
 
 if __name__ == "__main__":
     # Run the app on all network interfaces on port 8000
