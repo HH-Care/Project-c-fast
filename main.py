@@ -42,6 +42,13 @@ current_video_path = None
 # Selective tracking state
 selected_object_id = None
 
+# Webcam state management
+webcam_active = False
+webcam_thread = None
+webcam_source = 0  # Default camera
+webcam_frame_buffer = None
+webcam_lock = threading.Lock()
+
 # Standard dimensions for video processing
 STD_WIDTH = 1280
 STD_HEIGHT = 720
@@ -563,7 +570,7 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
         if diff_mean > 50 and tracking_enabled:  # Threshold for significant change
             print(f"Warning: Large frame difference detected ({diff_mean:.1f}). Resetting tracking.")
             reset_tracking_cache()
-            
+        
         # Run detection/tracking on the frame
         try:
             if tracking_enabled and selected_object_id is not None:
@@ -1544,6 +1551,352 @@ async def current_frame_index():
         return {"success": True, "frame_index": process_video.current_frame_index}
     else:
         return {"success": False, "frame_index": 0}
+
+def get_webcam_frame():
+    """Get the latest frame from webcam buffer"""
+    global webcam_frame_buffer
+    with webcam_lock:
+        if webcam_frame_buffer is not None:
+            return webcam_frame_buffer.copy()
+        return None
+
+def webcam_stream_thread():
+    """Background thread to capture webcam frames"""
+    global webcam_active, webcam_frame_buffer, webcam_source
+    
+    print(f"Starting webcam thread with camera index {webcam_source}")
+    
+    try:
+        # Try different backend options if default fails
+        backends = [cv2.CAP_ANY, cv2.CAP_DSHOW, cv2.CAP_MSMF]
+        
+        # Try each backend until one works
+        cap = None
+        for backend in backends:
+            try:
+                cap = cv2.VideoCapture(webcam_source, backend)
+                if cap.isOpened():
+                    # Successfully opened
+                    print(f"Successfully opened camera {webcam_source} with backend {backend}")
+                    break
+            except Exception as e:
+                print(f"Failed to open camera with backend {backend}: {e}")
+                if cap is not None:
+                    cap.release()
+                    cap = None
+        
+        if cap is None or not cap.isOpened():
+            print(f"Error: Could not open webcam source {webcam_source} with any backend")
+            webcam_active = False
+            return
+            
+        # Test if we can actually read frames
+        ret, test_frame = cap.read()
+        if not ret or test_frame is None:
+            print(f"Error: Camera opened but could not read frames")
+            cap.release()
+            webcam_active = False
+            return
+            
+        # Set resolution - only if camera supports it
+        original_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        original_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        print(f"Original camera resolution: {original_width}x{original_height}")
+        
+        # Try to set resolution, but don't fail if it doesn't work
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, STD_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, STD_HEIGHT)
+        
+        # Check if resolution was actually set
+        new_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        new_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        print(f"New camera resolution: {new_width}x{new_height}")
+        
+        # Main frame capture loop
+        frame_count = 0
+        error_count = 0
+        max_errors = 5  # Allow up to 5 consecutive errors before giving up
+        
+        while webcam_active:
+            try:
+                success, frame = cap.read()
+                if not success:
+                    error_count += 1
+                    print(f"Error reading from webcam (error {error_count}/{max_errors})")
+                    if error_count >= max_errors:
+                        print("Too many consecutive errors, stopping webcam thread")
+                        break
+                    time.sleep(0.1)  # Short delay before retry
+                    continue
+                
+                # Reset error count on successful frame read
+                error_count = 0
+                frame_count += 1
+                
+                # Update frame buffer with latest frame
+                with webcam_lock:
+                    webcam_frame_buffer = frame.copy()
+                
+                # Limit frame rate to avoid excessive CPU usage
+                time.sleep(0.03)  # ~30fps
+                
+                # Periodically log that the webcam is still running
+                if frame_count % 100 == 0:
+                    print(f"Webcam still running, captured {frame_count} frames")
+                    
+            except Exception as e:
+                error_count += 1
+                print(f"Exception in webcam thread: {e}")
+                if error_count >= max_errors:
+                    print("Too many consecutive errors, stopping webcam thread")
+                    break
+                time.sleep(0.1)  # Short delay before retry
+        
+        # Properly release the camera
+        print("Webcam thread stopping, releasing camera")
+        if cap is not None:
+            cap.release()
+        
+    except Exception as e:
+        print(f"Critical error in webcam thread: {e}")
+        import traceback
+        traceback.print_exc()
+        webcam_active = False
+    
+    print("Webcam thread stopped")
+
+@app.post("/start_webcam")
+async def start_webcam(camera_id: int = Form(0)):
+    """Start webcam stream with specified camera"""
+    global webcam_active, webcam_thread, webcam_source, selected_object_id, webcam_frame_buffer
+    
+    # Stop existing stream if running
+    if webcam_active and webcam_thread and webcam_thread.is_alive():
+        print("Stopping existing webcam thread")
+        webcam_active = False
+        webcam_thread.join(timeout=2.0)
+    
+    # Reset tracking data
+    reset_tracking_data()
+    
+    # Make sure webcam buffer is cleared
+    with webcam_lock:
+        webcam_frame_buffer = None
+    
+    # Start new stream
+    try:
+        print(f"Starting webcam with camera ID {camera_id}")
+        webcam_active = True
+        webcam_source = camera_id
+        webcam_thread = threading.Thread(target=webcam_stream_thread)
+        webcam_thread.daemon = True
+        webcam_thread.start()
+        
+        # Allow some time for the webcam to initialize
+        wait_time = 0
+        max_wait = 3.0  # Wait up to 3 seconds
+        
+        while wait_time < max_wait:
+            with webcam_lock:
+                if webcam_frame_buffer is not None:
+                    print("Webcam initialized successfully")
+                    return {"success": True, "message": f"Started webcam stream with camera {camera_id}"}
+            
+            # Check if thread is still alive
+            if not webcam_thread.is_alive():
+                print("Webcam thread died during initialization")
+                return {"success": False, "message": "Failed to initialize webcam"}
+                
+            # Wait a bit and try again
+            time.sleep(0.1)
+            wait_time += 0.1
+        
+        # If we get here, we timed out waiting for the first frame
+        if webcam_active and webcam_thread.is_alive():
+            print("Webcam thread is alive but no frames received yet")
+            return {"success": True, "message": "Webcam started but waiting for first frame"}
+        else:
+            print("Webcam failed to initialize in time")
+            webcam_active = False
+            return {"success": False, "message": "Failed to initialize webcam"}
+            
+    except Exception as e:
+        print(f"Error starting webcam: {e}")
+        webcam_active = False
+        return {"success": False, "message": f"Error starting webcam: {str(e)}"}
+
+@app.post("/stop_webcam")
+async def stop_webcam():
+    """Stop webcam stream"""
+    global webcam_active, webcam_thread
+    
+    if webcam_active and webcam_thread and webcam_thread.is_alive():
+        webcam_active = False
+        webcam_thread.join(timeout=2.0)
+        return {"success": True, "message": "Webcam stream stopped"}
+    
+    return {"success": False, "message": "No active webcam stream to stop"}
+
+@app.get("/webcam_feed")
+async def webcam_feed(
+    tracking: bool = Query(False, description="Enable object tracking"),
+    object_id: Optional[int] = Query(None, description="ID of specific object to track")
+):
+    """Stream video from webcam with object detection/tracking"""
+    return StreamingResponse(
+        process_webcam_stream(use_tracking=tracking, obj_id=object_id),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+def shutdown_webcam():
+    """Shutdown webcam stream gracefully"""
+    global webcam_active, webcam_thread
+    
+    if webcam_active and webcam_thread and webcam_thread.is_alive():
+        print("Shutting down webcam...")
+        webcam_active = False
+        webcam_thread.join(timeout=2.0)
+        print("Webcam shutdown complete")
+
+# Set up clean shutdown handler
+def signal_handler(sig, frame):
+    global running
+    print('Shutting down server...')
+    running = False
+    
+    # Shutdown the webcam if active
+    shutdown_webcam()
+    
+    # Give time for threads to exit
+    time.sleep(1)
+    sys.exit(0)
+
+# Register signal handler
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+@app.get("/get_available_cameras")
+async def get_available_cameras():
+    """Get list of available camera devices"""
+    available_cameras = []
+    
+    # More robust camera detection
+    for i in range(5):  # Check first 5 indices
+        try:
+            cap = cv2.VideoCapture(i, cv2.CAP_ANY)  # Use CAP_ANY to be more flexible
+            if cap.isOpened():
+                # Try to read a frame to confirm it's working
+                ret, _ = cap.read()
+                if ret:
+                    # Camera works and can read frames
+                    available_cameras.append({"id": i, "name": f"Camera {i}"})
+                cap.release()
+        except Exception as e:
+            print(f"Error checking camera {i}: {e}")
+            # Continue to next camera index
+    
+    print(f"Found {len(available_cameras)} available cameras: {available_cameras}")
+    return {"cameras": available_cameras}
+
+def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = None):
+    """Process the webcam stream and yield frames with detection/tracking"""
+    global track_history, box_size_history, direction_history, speed_history, selected_object_id, robust_tracker
+    
+    # Set selected object ID from parameter if provided
+    if obj_id is not None:
+        selected_object_id = obj_id
+    
+    # Initialize tracking
+    tracking_enabled = use_tracking
+    
+    # For optical flow
+    prev_frame = None
+    
+    # Performance monitoring variables
+    frame_times = []
+    last_frame_time = time.time()
+    processing_start_time = time.time()
+    
+    # Initialize frame counter
+    frame_count = 0
+    
+    while running and webcam_active:
+        # Get latest frame from buffer
+        frame = get_webcam_frame()
+        if frame is None:
+            # No frame available yet, wait a moment
+            time.sleep(0.03)
+            continue
+            
+        frame_start_time = time.time()
+        frame_count += 1
+        
+        # Resize frame to standard dimensions to ensure consistent processing
+        frame = cv2.resize(frame, (STD_WIDTH, STD_HEIGHT), interpolation=cv2.INTER_AREA)
+        
+        # Store for optical flow consistency check
+        if prev_frame is None:
+            prev_frame = frame.copy()
+            reset_tracking_cache()
+            continue
+            
+        # Check if frame is similar enough to previous for optical flow
+        frame_diff = cv2.absdiff(frame, prev_frame)
+        diff_mean = np.mean(frame_diff)
+        
+        # If frames are too different, reset tracking to avoid optical flow errors
+        if diff_mean > 50 and tracking_enabled:  # Threshold for significant change
+            print(f"Warning: Large frame difference detected ({diff_mean:.1f}). Resetting tracking.")
+            reset_tracking_cache()
+        
+        # Run detection/tracking on the frame
+        try:
+            # Run detection or tracking based on settings
+            if tracking_enabled:
+                results = model.track(frame, persist=True)
+            else:
+                results = model(frame)
+                
+            # Process results for visualization
+            # (Processing code is common between webcam and video functions)
+            
+            # Calculate FPS
+            frame_time = time.time() - frame_start_time
+            frame_times.append(frame_time)
+            if len(frame_times) > 30:
+                frame_times.pop(0)
+            
+            avg_frame_time = sum(frame_times) / len(frame_times)
+            fps_text = f"FPS: {1/avg_frame_time:.1f}"
+            
+            # Add processing mode and FPS to the frame
+            mode_text = "Tracking" if tracking_enabled else "Detection"
+            if selected_object_id is not None:
+                mode_text += f" (Tracking ID: {selected_object_id})"
+                
+            cv2.putText(frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(frame, fps_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # Store the previous frame for optical flow
+            prev_frame = frame.copy()
+            
+            # Encode frame to JPEG
+            _, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            
+            # Yield the frame
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                   
+            # Update frame processing time
+            last_frame_time = time.time()
+            
+        except Exception as e:
+            print(f"Error processing webcam frame: {e}")
+            import traceback
+            traceback.print_exc()
+            # Brief pause to prevent excessive error messages
+            time.sleep(0.1)
 
 if __name__ == "__main__":
     # Run the app on all network interfaces on port 8000

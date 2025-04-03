@@ -131,6 +131,41 @@
             padding: 8px;
             background: rgba(0, 0, 0, 0.2);
             border-radius: var(--border-radius);
+            border-left: 3px solid var(--military-green);
+        }
+
+        .status.error {
+            border-left: 3px solid var(--tactical-red);
+        }
+
+        .status.success {
+            border-left: 3px solid var(--accent-green);
+        }
+
+        .status.warning {
+            border-left: 3px solid #e9c46a;
+        }
+
+        /* Camera status indicator */
+        .camera-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            background-color: #555;
+        }
+
+        .camera-indicator.active {
+            background-color: var(--accent-green);
+            box-shadow: 0 0 8px var(--accent-green);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
         }
 
         .video-container {
@@ -329,71 +364,91 @@
             box-shadow: 0 0 20px rgba(135, 163, 48, 0.2);
         }
 
-        @keyframes pulse {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.05); }
-            100% { transform: scale(1); }
+        .select-input {
+            width: 100%;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--military-green);
+            border-radius: var(--border-radius);
+            color: var(--light-gray);
+            margin-bottom: 10px;
         }
 
-        .drawing-active .drawing-btn.active {
-            animation: pulse 2s infinite;
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
         }
 
-        .logo-section {
-            text-align: center;
-            margin: -20px -20px 20px -20px;
-            padding: 15px 20px;
-            background: linear-gradient(135deg, var(--military-dark) 0%, var(--gunmetal) 100%);
-            border-bottom: 2px solid var(--military-green);
-            position: relative;
-            overflow: hidden;
-            border-radius: var(--border-radius) var(--border-radius) 0 0;
+        .tab-btn {
+            background: var(--gunmetal);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            transition: all 0.3s;
         }
 
+        .tab-btn.active {
+            background: var(--military-green);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .checkbox-wrapper {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+
+        .checkbox-wrapper input[type="checkbox"] {
+            margin-right: 8px;
+        }
+
+        .camera-status {
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+        }
+
+        /* Fix logo size */
         .logo-section img {
-            max-width: 120px;
+            max-width: 100px;
             height: auto;
             margin-bottom: 10px;
-            position: relative;
-            z-index: 1;
         }
 
         .logo-section h1 {
             font-size: 1.2em;
-            color: var(--accent-green);
             margin: 5px 0;
-            position: relative;
-            z-index: 1;
-            text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
-            font-weight: 600;
-            letter-spacing: 0.5px;
         }
 
-        .logo-section p {
-            font-size: 0.8em;
+        .input-with-button {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .input-with-button input {
+            flex: 1;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--military-green);
+            border-radius: var(--border-radius);
             color: var(--light-gray);
-            margin: 3px 0;
-            position: relative;
-            z-index: 1;
-            opacity: 0.8;
-        }
-
-        .logo-section::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-image: 
-                linear-gradient(45deg, rgba(43, 48, 43, 0.1) 25%, transparent 25%),
-                linear-gradient(-45deg, rgba(43, 48, 43, 0.1) 25%, transparent 25%),
-                linear-gradient(45deg, transparent 75%, rgba(43, 48, 43, 0.1) 75%),
-                linear-gradient(-45deg, transparent 75%, rgba(43, 48, 43, 0.1) 75%);
-            background-size: 15px 15px;
-            background-position: 0 0, 0 7px, 7px -7px, -7px 0px;
-            opacity: 0.5;
-            z-index: 0;
         }
     </style>
   </head>
@@ -409,17 +464,53 @@
             </div>
 
             <div class="section">
-                <div class="section-title">Video Upload</div>
-                <div class="form-group">
-                    <label for="videoInput">Select Video File:</label>
-                    <input type="file" id="videoInput" accept="video/*">
-                    <button onclick="uploadVideo()">Upload Video</button>
-                    <div id="uploadStatus" class="status"></div>
+                <div class="section-title">Video Source</div>
+                <div class="tabs">
+                    <button class="tab-btn active" onclick="switchTab('upload-tab')">Upload Video</button>
+                    <button class="tab-btn" onclick="switchTab('webcam-tab')">Webcam</button>
+                </div>
+                
+                <!-- Video Upload Tab (existing functionality) -->
+                <div id="upload-tab" class="tab-content active">
+                    <div class="form-group">
+                        <label for="videoFile">Upload Video File</label>
+                        <input type="file" id="videoFile" accept="video/*">
+                        <button onclick="uploadVideo()">Upload Video</button>
+                        <div id="uploadStatus" class="status"></div>
+                    </div>
+                </div>
+                
+                <!-- Webcam Tab (new functionality) -->
+                <div id="webcam-tab" class="tab-content">
+                    <div class="form-group">
+                        <label for="cameraSelect">Select Camera</label>
+                        <select id="cameraSelect" class="select-input">
+                            <option value="0">Loading cameras...</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <div class="camera-status">
+                            <span class="camera-indicator" id="cameraIndicator"></span>
+                            Camera Status: <span id="cameraStatusText">Not connected</span>
+                        </div>
+                        <div class="button-group">
+                            <button id="startWebcamBtn" onclick="startWebcam()">Start Webcam</button>
+                            <button id="stopWebcamBtn" onclick="stopWebcam()" disabled>Stop Webcam</button>
+                        </div>
+                        <div id="webcamStatus" class="status"></div>
+                    </div>
+                    <div class="form-group">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" id="webcamTrackingToggle" checked onchange="toggleWebcamTracking()">
+                            <label for="webcamTrackingToggle">Enable Tracking</label>
+                        </div>
+                        <div class="help-text">Toggle real-time tracking of objects</div>
+                    </div>
                 </div>
             </div>
 
             <div class="section">
-                <h3 class="section-title">Drawing Controls</h3>
+                <div class="section-title">Drawing Controls</div>
                 <button id="drawModeBtn" style="display: block; background: var(--military-green); color: white; text-transform: uppercase;" onclick="toggleDrawingMode()">Enable Drawing Mode</button>
                 <button onclick="clearSelection()" style="display: block; margin-top: 10px; background: var(--gunmetal); color: white; text-transform: uppercase;">Clear Selection</button>
                 <div class="help-text">Draw a box around the object you want to track</div>
@@ -451,7 +542,7 @@
                 <div class="playback-controls">
                     <button class="control-btn" id="playBtn" onclick="togglePlay()" disabled>
                         <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M8 5v14l11-7z"/>
+                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>
                         </svg>
                     </button>
                     <button class="control-btn" id="stopBtn" onclick="stopVideo()" disabled>
@@ -475,6 +566,7 @@
         let isDrawing = false;
         let startX, startY;
         let currentRect = null;
+        let activeSource = 'video'; // 'video' or 'webcam'
 
         const videoFeed = document.getElementById('videoFeed');
         const drawCanvas = document.getElementById('drawCanvas');
@@ -628,7 +720,7 @@
         });
 
         function uploadVideo() {
-            const fileInput = document.getElementById('videoInput');
+            const fileInput = document.getElementById('videoFile');
             const file = fileInput.files[0];
             
             if (!file) {
@@ -819,10 +911,26 @@
         function stopVideo() {
             if (!currentVideo) return;
             
+            // For webcam, stop the webcam
+            if (currentVideo === 'webcam') {
+                console.log("Stopping webcam from video controls");
+                stopWebcam();
+                return;
+            }
+            
+            // For regular video
             isPlaying = false;
-            currentFrameIndex = 0; // Reset frame index when stopping
-            loadFirstFrame();
+            
+            const videoElem = document.getElementById('videoFeed');
+            videoElem.src = '';
+            videoElem.classList.remove('active');
+            document.getElementById('placeholder').style.display = 'block';
+            
+            // Reset tracking and selected object
+            selectedObjectId = null;
+            
             document.getElementById('videoStatus').textContent = 'Video stopped';
+            
             updateControlButtons();
         }
 
@@ -830,8 +938,11 @@
             const playBtn = document.getElementById('playBtn');
             const stopBtn = document.getElementById('stopBtn');
             
-            playBtn.disabled = !currentVideo;
-            stopBtn.disabled = !currentVideo;
+            // Enable controls if either regular video is loaded or webcam is active
+            const videoActive = currentVideo !== null;
+            
+            playBtn.disabled = !videoActive;
+            stopBtn.disabled = !videoActive;
 
             // Update play button icon with better SVG paths
             playBtn.innerHTML = isPlaying ? 
@@ -844,10 +955,26 @@
             
             isPlaying = !isPlaying;
             
-            if (isPlaying) {
-                startVideoStream();
+            // For webcam mode, we don't actually pause but just show/hide
+            if (currentVideo === 'webcam') {
+                const videoElem = document.getElementById('videoFeed');
+                
+                if (isPlaying) {
+                    console.log("Resuming webcam display");
+                    videoElem.style.display = 'block';
+                    document.getElementById('placeholder').style.display = 'none';
+                } else {
+                    console.log("Pausing webcam display (stream continues in background)");
+                    videoElem.style.display = 'none';
+                    document.getElementById('placeholder').style.display = 'block';
+                }
             } else {
-                pauseVideoStream();
+                // Regular video
+                if (isPlaying) {
+                    startVideoStream();
+                } else {
+                    pauseVideoStream();
+                }
             }
             
             updateControlButtons();
@@ -912,6 +1039,357 @@
                 initializeCanvas();
             }
         });
+
+        // Tab switching
+        function switchTab(tabId) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Deactivate all tab buttons
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(tabId).classList.add('active');
+            
+            // Find the clicked button and activate it
+            document.querySelector(`.tab-btn[onclick*="${tabId}"]`).classList.add('active');
+            
+            // Reset video feed if tab is changed
+            const videoElem = document.getElementById('videoFeed');
+            videoElem.src = '';
+            videoElem.classList.remove('active');
+            
+            // If switching to webcam tab, load available cameras
+            if (tabId === 'webcam-tab') {
+                loadAvailableCameras();
+                activeSource = 'webcam';
+                updateCameraStatus('Not connected', false);
+                document.getElementById('webcamStatus').className = 'status';
+                document.getElementById('webcamStatus').textContent = 'Select and start a camera';
+            } else {
+                activeSource = 'video';
+                // Stop webcam if it was running
+                if (document.getElementById('stopWebcamBtn') && !document.getElementById('stopWebcamBtn').disabled) {
+                    stopWebcam();
+                }
+            }
+        }
+        
+        // Load available cameras
+        async function loadAvailableCameras() {
+            try {
+                const statusElem = document.getElementById('webcamStatus');
+                statusElem.textContent = 'Searching for cameras...';
+                
+                const response = await fetch('/get_available_cameras');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                const select = document.getElementById('cameraSelect');
+                select.innerHTML = '';
+                
+                if (!data.cameras || data.cameras.length === 0) {
+                    select.innerHTML = '<option value="-1">No cameras found</option>';
+                    document.getElementById('startWebcamBtn').disabled = true;
+                    statusElem.textContent = 'No cameras detected';
+                } else {
+                    data.cameras.forEach(camera => {
+                        const option = document.createElement('option');
+                        option.value = camera.id;
+                        option.textContent = camera.name;
+                        select.appendChild(option);
+                    });
+                    document.getElementById('startWebcamBtn').disabled = false;
+                    statusElem.textContent = `Found ${data.cameras.length} camera(s)`;
+                }
+            } catch (error) {
+                console.error('Error loading cameras:', error);
+                document.getElementById('webcamStatus').textContent = 'Error detecting cameras: ' + error.message;
+                
+                // Add fallback option
+                const select = document.getElementById('cameraSelect');
+                select.innerHTML = '';
+                select.innerHTML = '<option value="0">Default Camera</option>';
+                document.getElementById('startWebcamBtn').disabled = false;
+            }
+        }
+        
+        // Update status indicator
+        function updateCameraStatus(status, isActive = false) {
+            const indicator = document.getElementById('cameraIndicator');
+            const statusText = document.getElementById('cameraStatusText');
+            
+            if (isActive) {
+                indicator.classList.add('active');
+            } else {
+                indicator.classList.remove('active');
+            }
+            
+            statusText.textContent = status;
+        }
+        
+        // Start webcam stream
+        async function startWebcam() {
+            const cameraId = document.getElementById('cameraSelect').value;
+            const statusElem = document.getElementById('webcamStatus');
+            
+            if (cameraId === "-1") {
+                statusElem.textContent = 'No cameras available';
+                updateCameraStatus('No cameras available', false);
+                return;
+            }
+            
+            try {
+                statusElem.textContent = 'Starting webcam...';
+                updateCameraStatus('Connecting...', false);
+                document.getElementById('startWebcamBtn').disabled = true;
+                
+                const formData = new FormData();
+                formData.append('camera_id', cameraId);
+                
+                const response = await fetch('/start_webcam', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    statusElem.textContent = 'Webcam active: ' + data.message;
+                    statusElem.className = 'status success';
+                    updateCameraStatus('Connected', true);
+                    document.getElementById('startWebcamBtn').disabled = true;
+                    document.getElementById('stopWebcamBtn').disabled = false;
+                    
+                    // Update video feed source
+                    const videoElem = document.getElementById('videoFeed');
+                    const trackingEnabled = getTrackingEnabled();
+                    
+                    // Show video element, hide placeholder
+                    document.getElementById('placeholder').style.display = 'none';
+                    videoElem.style.display = 'block';
+                    
+                    // Set current video to special webcam indicator
+                    currentVideo = 'webcam';
+                    isPlaying = true;
+                    
+                    // Update control buttons
+                    updateControlButtons();
+                    
+                    // Set source to webcam feed with tracking parameters
+                    const webcamUrl = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}`;
+                    console.log("Setting webcam URL to:", webcamUrl);
+                    videoElem.src = webcamUrl;
+                    videoElem.classList.add('active');
+                    
+                    // Set up error handling for video feed
+                    videoElem.onerror = function() {
+                        console.error("Error loading webcam feed");
+                        statusElem.textContent = 'Error receiving webcam feed';
+                        statusElem.className = 'status error';
+                        updateCameraStatus('Error', false);
+                        // Try to recover
+                        retryWebcamFeed(3);
+                    };
+                } else {
+                    document.getElementById('startWebcamBtn').disabled = false;
+                    statusElem.textContent = `Error: ${data.message}`;
+                    statusElem.className = 'status error';
+                    updateCameraStatus('Connection failed', false);
+                }
+            } catch (error) {
+                console.error('Error starting webcam:', error);
+                document.getElementById('startWebcamBtn').disabled = false;
+                statusElem.textContent = 'Failed to start webcam: ' + error.message;
+                statusElem.className = 'status error';
+                updateCameraStatus('Connection failed', false);
+            }
+        }
+        
+        // Retry webcam feed if it fails
+        async function retryWebcamFeed(retriesLeft) {
+            if (retriesLeft <= 0) {
+                document.getElementById('webcamStatus').textContent = 'Could not connect to webcam after retries';
+                document.getElementById('startWebcamBtn').disabled = false;
+                document.getElementById('stopWebcamBtn').disabled = true;
+                return;
+            }
+            
+            console.log(`Retrying webcam feed, ${retriesLeft} attempts left`);
+            
+            // Wait a moment before retry
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            const videoElem = document.getElementById('videoFeed');
+            const trackingEnabled = getTrackingEnabled();
+            
+            // Add timestamp to URL to prevent caching
+            const timestamp = new Date().getTime();
+            videoElem.src = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}&t=${timestamp}`;
+            
+            videoElem.onerror = function() {
+                retryWebcamFeed(retriesLeft - 1);
+            };
+        }
+        
+        // Stop webcam stream
+        async function stopWebcam() {
+            const statusElem = document.getElementById('webcamStatus');
+            
+            try {
+                statusElem.textContent = 'Stopping webcam...';
+                statusElem.className = 'status';
+                updateCameraStatus('Disconnecting...', false);
+                
+                const response = await fetch('/stop_webcam', {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    statusElem.textContent = 'Webcam stopped';
+                    statusElem.className = 'status';
+                    updateCameraStatus('Disconnected', false);
+                    document.getElementById('startWebcamBtn').disabled = false;
+                    document.getElementById('stopWebcamBtn').disabled = true;
+                    
+                    // Hide video feed
+                    const videoElem = document.getElementById('videoFeed');
+                    videoElem.src = '';
+                    videoElem.classList.remove('active');
+                    
+                    // Reset video state
+                    currentVideo = null;
+                    isPlaying = false;
+                    updateControlButtons();
+                    
+                    // Show placeholder
+                    document.getElementById('placeholder').style.display = 'block';
+                    videoElem.style.display = 'none';
+                    
+                    // Reset selected object
+                    selectedObjectId = null;
+                } else {
+                    statusElem.textContent = `Error: ${data.message}`;
+                    statusElem.className = 'status warning';
+                }
+            } catch (error) {
+                console.error('Error stopping webcam:', error);
+                statusElem.textContent = 'Failed to stop webcam: ' + error.message;
+                statusElem.className = 'status error';
+            }
+        }
+
+        // Get tracking state based on current source
+        function getTrackingEnabled() {
+            if (activeSource === 'webcam') {
+                return document.getElementById('webcamTrackingToggle').checked;
+            } else {
+                return true; // Always enabled for video mode
+            }
+        }
+
+        // Toggle webcam tracking
+        function toggleWebcamTracking() {
+            // Only applies to webcam mode
+            if (activeSource === 'webcam' && currentVideo === 'webcam') {
+                const trackingEnabled = document.getElementById('webcamTrackingToggle').checked;
+                const videoElem = document.getElementById('videoFeed');
+                
+                console.log("Updating webcam feed with tracking:", trackingEnabled);
+                // Webcam is active, update with tracking parameter
+                videoElem.src = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}`;
+            }
+        }
+
+        // Set up object tracking by ID
+        function trackObject() {
+            const objectId = document.getElementById('objectId').value;
+            if (!objectId) {
+                alert("Please enter an object ID to track");
+                return;
+            }
+            
+            selectedObjectId = objectId;
+            const videoElem = document.getElementById('videoFeed');
+            const trackingEnabled = getTrackingEnabled();
+            
+            console.log(`Tracking object ID: ${objectId}, activeSource: ${activeSource}, currentVideo: ${currentVideo}`);
+            
+            // If webcam is active
+            if (activeSource === 'webcam' && currentVideo === 'webcam') {
+                videoElem.src = `/webcam_feed?tracking=${trackingEnabled}&object_id=${objectId}`;
+            } 
+            // If video upload is active
+            else if (activeSource === 'video' && currentVideo && currentVideo !== 'webcam') {
+                videoElem.src = `/video_feed?filename=${currentVideo}&tracking=${trackingEnabled}&object_id=${objectId}`;
+            }
+        }
+
+        // Update when we draw a rectangle
+        function selectDrawnObject() {
+            if (!currentRect) return;
+            
+            const bbox = {
+                bbox: {
+                    x: currentRect.x / canvas.width,
+                    y: currentRect.y / canvas.height,
+                    width: currentRect.width / canvas.width,
+                    height: currentRect.height / canvas.height
+                }
+            };
+            
+            fetch('/select_object', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(bbox)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    selectedObjectId = data.selected_id;
+                    document.getElementById('objectId').value = selectedObjectId;
+                    
+                    // Update video source to track the selected object
+                    const videoElem = document.getElementById('videoFeed');
+                    const trackingEnabled = getTrackingEnabled();
+                    
+                    console.log(`Selected object ID: ${selectedObjectId}, activeSource: ${activeSource}, currentVideo: ${currentVideo}`);
+                    
+                    // If webcam is active
+                    if (activeSource === 'webcam' && currentVideo === 'webcam') {
+                        // Webcam is active, update with tracking parameter
+                        videoElem.src = `/webcam_feed?tracking=${trackingEnabled}&object_id=${selectedObjectId}`;
+                    } 
+                    // If video upload is active
+                    else if (activeSource === 'video' && currentVideo && currentVideo !== 'webcam') {
+                        // Update video source with tracking parameter
+                        videoElem.src = `/video_feed?filename=${currentVideo}&tracking=${trackingEnabled}&object_id=${selectedObjectId}`;
+                    }
+                    
+                    toggleDrawing(); // Exit drawing mode
+                } else {
+                    alert(`Error selecting object: ${data.error}`);
+                }
+            })
+            .catch(error => {
+                console.error('Error selecting object:', error);
+            });
+        }
     </script>
   </body>
 </html>
