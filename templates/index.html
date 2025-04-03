@@ -483,19 +483,27 @@
                 <!-- Webcam Tab (new functionality) -->
                 <div id="webcam-tab" class="tab-content">
                     <div class="form-group">
-                        <label for="cameraSelect">Select Camera</label>
+                        <label for="cameraSelect">Select Local Camera</label>
                         <select id="cameraSelect" class="select-input">
                             <option value="0">Loading cameras...</option>
                         </select>
                     </div>
+                    
+                    <!-- Browser Camera Access -->
+                    <div class="form-group">
+                        <label for="browserCamera">Use Browser Camera (Cloud-friendly)</label>
+                        <button onclick="accessBrowserCamera()" class="select-input">Start Browser Camera</button>
+                        <div class="help-text">Uses your device's camera instead of server camera - ideal for AWS EC2</div>
+                    </div>
+                    
                     <div class="form-group">
                         <div class="camera-status">
                             <span class="camera-indicator" id="cameraIndicator"></span>
                             Camera Status: <span id="cameraStatusText">Not connected</span>
                         </div>
                         <div class="button-group">
-                            <button id="startWebcamBtn" onclick="startWebcam()">Start Webcam</button>
-                            <button id="stopWebcamBtn" onclick="stopWebcam()" disabled>Stop Webcam</button>
+                            <button id="startWebcamBtn" onclick="startWebcam()">Start Local Camera</button>
+                            <button id="stopWebcamBtn" onclick="stopWebcam()" disabled>Stop Camera</button>
                         </div>
                         <div id="webcamStatus" class="status"></div>
                     </div>
@@ -519,8 +527,8 @@
             <div class="section">
                 <div class="section-title">Server Controls</div>
                 <div class="form-group">
-                    <button class="danger" onclick="shutdownServer()">Shutdown Server</button>
-                    <div class="help-text">Safely stop the server and clean up resources</div>
+                    <button class="danger" onclick="clearServerData()">Clear Data</button>
+                    <div class="help-text">Remove all uploaded videos and cached files</div>
                 </div>
             </div>
         </div>
@@ -981,6 +989,14 @@
                 
                 if (isPlaying) {
                     console.log("Resuming webcam");
+                    
+                    // Handle browser camera specifically
+                    if (window.frameCapture) {
+                        // Pause frame capture for browser camera
+                        clearInterval(window.frameCapture);
+                        window.frameCapture = null;
+                    }
+                    
                     // Call the resume endpoint
                     fetch('/resume_webcam', {
                         method: 'POST'
@@ -999,6 +1015,14 @@
                     });
                 } else {
                     console.log("Pausing webcam");
+                    
+                    // Handle browser camera specifically
+                    if (window.frameCapture) {
+                        // Pause frame capture for browser camera
+                        clearInterval(window.frameCapture);
+                        window.frameCapture = null;
+                    }
+                    
                     // Call the pause endpoint
                     fetch('/pause_webcam', {
                         method: 'POST'
@@ -1065,28 +1089,75 @@
             }
         }
 
-        function shutdownServer() {
-            if (confirm('Are you sure you want to shutdown the server?')) {
-                fetch('/shutdown')
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.message);
-                    })
-                    .catch(error => {
-                        alert('Failed to shutdown server: ' + error);
-                    });
+        function clearServerData() {
+            if (confirm('Are you sure you want to clear all uploaded videos and cached data?')) {
+                document.getElementById('videoStatus').textContent = 'Clearing data...';
+                
+                fetch('/clear_data', {
+                    method: 'POST'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('videoStatus').textContent = data.message;
+                        // Reset UI state
+                        resetState();
+                        // Ensure video elements are reset
+                        const videoElem = document.getElementById('videoFeed');
+                        videoElem.src = '';
+                        videoElem.classList.remove('active');
+                        document.getElementById('placeholder').style.display = 'block';
+                        videoElem.style.display = 'none';
+                    } else {
+                        document.getElementById('videoStatus').textContent = 'Error: ' + data.message;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error clearing data:', error);
+                    document.getElementById('videoStatus').textContent = 'Failed to clear data: ' + error;
+                });
             }
         }
 
         // Update control buttons on page load
-        document.addEventListener('DOMContentLoaded', updateControlButtons);
-
-        // Add resize event listener to handle canvas resizing
-        window.addEventListener('resize', () => {
-            if (isDrawingMode) {
-                initializeCanvas();
-            }
+        document.addEventListener('DOMContentLoaded', function() {
+            // Check browser compatibility
+            checkBrowserCompatibility();
+            
+            // Update control buttons
+            updateControlButtons();
         });
+
+        // Function to check browser compatibility
+        function checkBrowserCompatibility() {
+            // Check for browser camera support
+            const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+            const hasCanvasToBlob = !!(window.HTMLCanvasElement && HTMLCanvasElement.prototype.toBlob);
+            
+            // If running in a non-secure context, getUserMedia may be blocked
+            const isSecureContext = window.isSecureContext;
+            
+            // Log compatibility info
+            console.log("Browser compatibility check:");
+            console.log("- getUserMedia API:", hasGetUserMedia ? "✓ Available" : "✗ Not Available");
+            console.log("- Canvas to Blob:", hasCanvasToBlob ? "✓ Available" : "✗ Not Available");
+            console.log("- Secure Context:", isSecureContext ? "✓ Yes" : "✗ No (camera may be blocked)");
+            
+            // Update UI based on compatibility
+            if (!hasGetUserMedia) {
+                const browserCamButton = document.querySelector('button[onclick="accessBrowserCamera()"]');
+                if (browserCamButton) {
+                    browserCamButton.disabled = true;
+                    browserCamButton.title = "Your browser doesn't support camera access";
+                    browserCamButton.innerHTML = "Browser Camera Not Supported";
+                }
+            }
+            
+            // Warn user if not in secure context
+            if (!isSecureContext) {
+                console.warn("Application is not running in a secure context (HTTPS). Camera access may be blocked.");
+            }
+        }
 
         // Tab switching
         function switchTab(tabId) {
@@ -1190,63 +1261,69 @@
             const cameraId = document.getElementById('cameraSelect').value;
             const statusElem = document.getElementById('webcamStatus');
             const videoStatusElem = document.getElementById('videoStatus');
-            
+
             if (cameraId === "-1") {
-                statusElem.textContent = 'No cameras available';
-                videoStatusElem.textContent = 'No cameras available';
-                updateCameraStatus('No cameras available', false);
+                statusElem.textContent = 'No cameras available, try browser camera instead';
+                videoStatusElem.textContent = 'No cameras available, try browser camera instead';
+                updateCameraStatus('No camera selected', false);
                 return;
             }
-            
+
+            // Special handling for browser camera
+            if (cameraId === "browser") {
+                startBrowserCamera();
+                return;
+            }
+
             try {
-                statusElem.textContent = 'Starting webcam...';
-                videoStatusElem.textContent = 'Starting webcam...';
+                statusElem.textContent = 'Starting local camera...';
+                videoStatusElem.textContent = 'Starting local camera...';
                 updateCameraStatus('Connecting...', false);
                 document.getElementById('startWebcamBtn').disabled = true;
-                
+
                 const formData = new FormData();
                 formData.append('camera_id', cameraId);
-                
+
                 const response = await fetch('/start_webcam', {
                     method: 'POST',
                     body: formData
                 });
-                
+
                 if (!response.ok) {
                     throw new Error(`HTTP error! Status: ${response.status}`);
                 }
-                
+
                 const data = await response.json();
-                
+
                 if (data.success) {
-                    statusElem.textContent = 'Webcam active: ' + data.message;
-                    videoStatusElem.textContent = 'Webcam active: Ready for object detection and tracking';
+                    statusElem.textContent = 'Local camera active: ' + data.message;
+                    videoStatusElem.textContent = 'Local camera active: Ready for object detection and tracking'; 
                     statusElem.className = 'status success';
                     updateCameraStatus('Connected', true);
                     document.getElementById('startWebcamBtn').disabled = true;
                     document.getElementById('stopWebcamBtn').disabled = false;
-                    
+
                     // Update video feed source
                     const videoElem = document.getElementById('videoFeed');
                     const trackingEnabled = getTrackingEnabled();
-                    
+
                     // Show video element, hide placeholder
                     document.getElementById('placeholder').style.display = 'none';
                     videoElem.style.display = 'block';
-                    
+
                     // Set current video to special webcam indicator
                     currentVideo = 'webcam';
                     isPlaying = true;
-                    
+
                     // Update control buttons
                     updateControlButtons();
-                    
+
                     // Set source to webcam feed with tracking parameters
                     const webcamUrl = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}`;
                     console.log("Setting webcam URL to:", webcamUrl);
                     videoElem.src = webcamUrl;
                     videoElem.classList.add('active');
-                    
+
                     // Set up error handling for video feed
                     videoElem.onerror = function() {
                         console.error("Error loading webcam feed");
@@ -1312,6 +1389,11 @@
                 videoStatusElem.textContent = 'Stopping webcam...';
                 statusElem.className = 'status';
                 updateCameraStatus('Disconnecting...', false);
+                
+                // Check if using browser camera
+                if (window.browserStream) {
+                    stopBrowserCamera();
+                }
                 
                 const response = await fetch('/stop_webcam', {
                     method: 'POST'
@@ -1421,6 +1503,270 @@
             else if (activeSource === 'video' && currentVideo && currentVideo !== 'webcam') {
                 videoElem.src = `/video_feed?filename=${currentVideo}&tracking=${trackingEnabled}&object_id=${objectId}`;
             }
+        }
+
+        // Function to handle browser camera setup
+        async function startBrowserCamera() {
+            const statusElem = document.getElementById('webcamStatus');
+            const videoStatusElem = document.getElementById('videoStatus');
+            updateCameraStatus('Initializing browser camera...', false);
+            statusElem.textContent = 'Requesting camera permission...';
+            videoStatusElem.textContent = 'Requesting camera permission...';
+            
+            try {
+                // Create video element for browser camera
+                if (!window.browserVideoElement) {
+                    window.browserVideoElement = document.createElement('video');
+                    window.browserVideoElement.id = 'browserVideo';
+                    window.browserVideoElement.style.display = 'none';
+                    window.browserVideoElement.autoplay = true;
+                    window.browserVideoElement.muted = true;
+                    window.browserVideoElement.playsInline = true;
+                    document.body.appendChild(window.browserVideoElement);
+                }
+                
+                // Check if getUserMedia is supported
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("Browser doesn't support camera access (getUserMedia API)");
+                }
+                
+                // Try to get camera with ideal settings first
+                let stream = null;
+                try {
+                    console.log("Attempting to access camera with ideal settings...");
+                    stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { 
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 }
+                        }, 
+                        audio: false 
+                    });
+                } catch (err) {
+                    console.log("Failed with ideal settings, trying basic settings...", err);
+                    // Try with minimal constraints
+                    stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: true, 
+                        audio: false 
+                    });
+                }
+                
+                if (!stream) {
+                    throw new Error("Could not get camera stream");
+                }
+                
+                // Connect stream to video element
+                window.browserVideoElement.srcObject = stream;
+                window.browserStream = stream;
+                
+                // Wait for video to be ready with timeout
+                await Promise.race([
+                    new Promise(resolve => {
+                        window.browserVideoElement.onloadedmetadata = resolve;
+                    }),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout waiting for camera")), 5000))
+                ]);
+                
+                // Start playing to get access to video frames
+                await window.browserVideoElement.play();
+                
+                // Update UI
+                statusElem.textContent = 'Browser camera active';
+                videoStatusElem.textContent = 'Browser camera active: Ready for object detection and tracking';
+                statusElem.className = 'status success';
+                updateCameraStatus('Connected', true);
+                document.getElementById('startWebcamBtn').disabled = true;
+                document.getElementById('stopWebcamBtn').disabled = false;
+                
+                // Update server that we're using browser camera
+                const formData = new FormData();
+                formData.append('camera_id', 'browser');
+                await fetch('/start_webcam', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                // Show video element, hide placeholder
+                document.getElementById('placeholder').style.display = 'none';
+                const videoElem = document.getElementById('videoFeed');
+                videoElem.style.display = 'block';
+                
+                // Set current video to special webcam indicator
+                currentVideo = 'webcam';
+                isPlaying = true;
+                
+                // Update control buttons
+                updateControlButtons();
+                
+                // Set source to webcam feed with tracking parameters
+                const trackingEnabled = getTrackingEnabled();
+                const webcamUrl = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}`;
+                console.log("Setting webcam URL to:", webcamUrl);
+                videoElem.src = webcamUrl;
+                videoElem.classList.add('active');
+                
+                // Start sending frames to server
+                startBrowserFrameCapture();
+                
+            } catch (error) {
+                console.error('Error starting browser camera:', error);
+                let errorMessage = error.name === 'NotAllowedError' 
+                    ? 'Camera access denied. Please allow camera access and try again.' 
+                    : error.message || 'Could not start video source';
+                    
+                // Add troubleshooting guidance
+                const troubleshooting = 'Troubleshooting: Make sure no other app is using your camera and try reloading the page.';
+                
+                statusElem.textContent = 'Failed to start browser camera: ' + errorMessage;
+                videoStatusElem.textContent = 'Camera error: ' + errorMessage + '. ' + troubleshooting;
+                statusElem.className = 'status error';
+                updateCameraStatus('Camera access failed', false);
+                document.getElementById('startWebcamBtn').disabled = false;
+            }
+        }
+
+        // Function to stop browser camera
+        function stopBrowserCamera() {
+            if (window.browserStream) {
+                // Stop all tracks
+                window.browserStream.getTracks().forEach(track => track.stop());
+                window.browserStream = null;
+            }
+            
+            if (window.frameCapture) {
+                clearInterval(window.frameCapture);
+                window.frameCapture = null;
+            }
+            
+            if (window.browserVideoElement) {
+                window.browserVideoElement.srcObject = null;
+            }
+            
+            console.log("Browser camera stopped");
+        }
+
+        // Function to capture and send frames from browser camera to server
+        function startBrowserFrameCapture() {
+            // Clear any existing interval
+            if (window.frameCapture) {
+                clearInterval(window.frameCapture);
+            }
+            
+            // Create canvas for frame capture if it doesn't exist
+            if (!window.captureCanvas) {
+                window.captureCanvas = document.createElement('canvas');
+                window.captureCanvasCtx = window.captureCanvas.getContext('2d');
+            }
+            
+            const video = window.browserVideoElement;
+            const canvas = window.captureCanvas;
+            const ctx = window.captureCanvasCtx;
+            
+            if (!video || !video.srcObject || !ctx) {
+                console.error("Cannot start frame capture - video element or context not ready");
+                document.getElementById('videoStatus').textContent = 'Error: Camera initialization failed';
+                return;
+            }
+            
+            // Set canvas size to match video
+            canvas.width = video.videoWidth || 640;
+            canvas.height = video.videoHeight || 480;
+            
+            console.log(`Starting frame capture at ${canvas.width}x${canvas.height}`);
+            
+            // Track consecutive errors
+            let errorCount = 0;
+            const MAX_ERRORS = 5;
+            
+            // Capture and send frames at regular interval
+            window.frameCapture = setInterval(async () => {
+                // Early exit checks
+                if (!video.srcObject) {
+                    console.log("Video source disconnected");
+                    clearInterval(window.frameCapture);
+                    window.frameCapture = null;
+                    return;
+                }
+                
+                // Don't send frames if paused
+                if (!isPlaying) {
+                    return;
+                }
+                
+                try {
+                    // Draw current video frame to canvas
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    
+                    // Convert to blob
+                    const blob = await new Promise((resolve, reject) => {
+                        canvas.toBlob(blob => {
+                            if (blob) resolve(blob);
+                            else reject(new Error("Failed to create blob"));
+                        }, 'image/jpeg', 0.8);
+                    });
+                    
+                    // Send to server
+                    const formData = new FormData();
+                    formData.append('file', blob, 'browser-frame.jpg');
+                    
+                    const response = await fetch('/browser_camera_frame', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`Server rejected frame: ${response.status}`);
+                    }
+                    
+                    // Reset error count on success
+                    errorCount = 0;
+                    
+                } catch (error) {
+                    errorCount++;
+                    console.error(`Error sending frame to server (${errorCount}/${MAX_ERRORS}):`, error);
+                    
+                    // If we've had too many consecutive errors, stop the capture
+                    if (errorCount >= MAX_ERRORS) {
+                        console.error("Too many frame capture errors, stopping capture");
+                        document.getElementById('videoStatus').textContent = 'Error: Connection to server lost. Please refresh the page.';
+                        clearInterval(window.frameCapture);
+                        window.frameCapture = null;
+                    }
+                }
+            }, 100); // Send ~10 FPS - adjust for performance
+        }
+
+        // Add resize event listener to handle canvas resizing
+        window.addEventListener('resize', () => {
+            if (isDrawingMode) {
+                initializeCanvas();
+            }
+        });
+    </script>
+    
+    <!-- Browser Camera Access Functions -->
+    <script>
+        // The original browser camera functions are being replaced by the newer implementation
+        // Keep the function wrappers for backward compatibility if needed
+        
+        // Redirect to the new functions
+        function accessBrowserCamera() {
+            const cameraSelect = document.getElementById('cameraSelect');
+            cameraSelect.value = "browser";
+            startWebcam(); // Use the main webcam function with browser selected
+        }
+        
+        // Update the togglePlay function to use the newer implementation
+        const originalTogglePlay = togglePlay;
+        togglePlay = function() {
+            // Use the standard togglePlay implementation that already has browser camera handling
+            originalTogglePlay();
+        }
+        
+        // Update the stopVideo function to use the newer implementation
+        const originalStopVideo = stopVideo;
+        stopVideo = function() {
+            // Use the standard stopVideo implementation that already has browser camera handling
+            originalStopVideo();
         }
     </script>
   </body>
