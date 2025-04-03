@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Optional, Dict
 from collections import defaultdict
 from pydantic import BaseModel
+from datetime import datetime
+import base64
 
 # Create uploads directory if it doesn't exist
 UPLOAD_DIR = Path("uploads")
@@ -1653,29 +1655,51 @@ def get_webcam_frame():
 
 def webcam_stream_thread():
     """Background thread to capture webcam frames"""
-    global webcam_active, webcam_frame_buffer, webcam_source
+    global webcam_active, webcam_frame_buffer, webcam_source, webcam_paused
     
-    print(f"Starting webcam thread with camera index {webcam_source}")
+    print(f"Starting webcam thread with source: {webcam_source}")
+    
+    # Special case for browser camera
+    if webcam_source == "browser":
+        print("Browser camera selected. Waiting for browser to send frames...")
+        webcam_active = True
+        return  # Exit thread - frames will be sent from browser
+    
+    # Special case for demo mode or no camera
+    if webcam_source == "no_cam":
+        print("No camera available - entering placeholder mode")
+        webcam_active = True
+        return  # Exit thread - no actual camera processing needed
     
     try:
-        # Try different backend options if default fails
-        backends = [cv2.CAP_ANY, cv2.CAP_DSHOW, cv2.CAP_MSMF]
-        
-        # Try each backend until one works
-        cap = None
-        for backend in backends:
-            try:
-                cap = cv2.VideoCapture(webcam_source, backend)
-                if cap.isOpened():
-                    # Successfully opened
-                    print(f"Successfully opened camera {webcam_source} with backend {backend}")
-                    break
-            except Exception as e:
-                print(f"Failed to open camera with backend {backend}: {e}")
-                if cap is not None:
-                    cap.release()
-                    cap = None
-        
+        # Try to interpret as a local camera index
+        try:
+            camera_idx = int(webcam_source)
+            print(f"Attempting to open local camera with index: {camera_idx}")
+            
+            # Try different backend options if default fails
+            backends = [cv2.CAP_ANY, cv2.CAP_DSHOW, cv2.CAP_MSMF]
+            
+            # Try each backend until one works
+            cap = None
+            for backend in backends:
+                try:
+                    cap = cv2.VideoCapture(camera_idx, backend)
+                    if cap.isOpened():
+                        # Successfully opened
+                        print(f"Successfully opened camera {camera_idx} with backend {backend}")
+                        break
+                except Exception as e:
+                    print(f"Failed to open camera with backend {backend}: {e}")
+                    if cap is not None:
+                        cap.release()
+                        cap = None
+        except ValueError:
+            print(f"Error: Invalid camera source '{webcam_source}'")
+            webcam_active = False
+            return
+            
+        # Check if we have a valid capture object    
         if cap is None or not cap.isOpened():
             print(f"Error: Could not open webcam source {webcam_source} with any backend")
             webcam_active = False
@@ -1710,29 +1734,30 @@ def webcam_stream_thread():
         
         while webcam_active:
             try:
-                success, frame = cap.read()
-                if not success:
-                    error_count += 1
-                    print(f"Error reading from webcam (error {error_count}/{max_errors})")
-                    if error_count >= max_errors:
-                        print("Too many consecutive errors, stopping webcam thread")
-                        break
-                    time.sleep(0.1)  # Short delay before retry
-                    continue
-                
-                # Reset error count on successful frame read
-                error_count = 0
-                frame_count += 1
-                
-                # Update frame buffer with latest frame
-                with webcam_lock:
-                    webcam_frame_buffer = frame.copy()
+                if not webcam_paused:
+                    success, frame = cap.read()
+                    if not success:
+                        error_count += 1
+                        print(f"Error reading from webcam (error {error_count}/{max_errors})")
+                        if error_count >= max_errors:
+                            print("Too many consecutive errors, stopping webcam thread")
+                            break
+                        time.sleep(0.1)  # Short delay before retry
+                        continue
+                    
+                    # Reset error count on successful frame read
+                    error_count = 0
+                    frame_count += 1
+                    
+                    # Update frame buffer with latest frame
+                    with webcam_lock:
+                        webcam_frame_buffer = frame.copy()
                 
                 # Limit frame rate to avoid excessive CPU usage
                 time.sleep(0.03)  # ~30fps
                 
                 # Periodically log that the webcam is still running
-                if frame_count % 100 == 0:
+                if frame_count % 100 == 0 and not webcam_paused:
                     print(f"Webcam still running, captured {frame_count} frames")
                     
             except Exception as e:
@@ -1757,7 +1782,7 @@ def webcam_stream_thread():
     print("Webcam thread stopped")
 
 @app.post("/start_webcam")
-async def start_webcam(camera_id: int = Form(0)):
+async def start_webcam(camera_id: str = Form("0")):
     """Start webcam stream with specified camera"""
     global webcam_active, webcam_thread, webcam_source, selected_object_id, webcam_frame_buffer
     
@@ -1776,7 +1801,7 @@ async def start_webcam(camera_id: int = Form(0)):
     
     # Start new stream
     try:
-        print(f"Starting webcam with camera ID {camera_id}")
+        print(f"Starting webcam with camera ID: {camera_id}")
         webcam_active = True
         webcam_source = camera_id
         webcam_thread = threading.Thread(target=webcam_stream_thread)
@@ -1871,7 +1896,8 @@ async def get_available_cameras():
     """Get list of available camera devices"""
     available_cameras = []
     
-    # More robust camera detection
+    # For local development, try to detect physical cameras
+    print("Checking for local camera devices...")
     for i in range(5):  # Check first 5 indices
         try:
             cap = cv2.VideoCapture(i, cv2.CAP_ANY)  # Use CAP_ANY to be more flexible
@@ -1880,11 +1906,18 @@ async def get_available_cameras():
                 ret, _ = cap.read()
                 if ret:
                     # Camera works and can read frames
-                    available_cameras.append({"id": i, "name": f"Camera {i}"})
+                    available_cameras.append({"id": str(i), "name": f"Camera {i}"})
                 cap.release()
         except Exception as e:
             print(f"Error checking camera {i}: {e}")
             # Continue to next camera index
+    
+    # Add browser camera option at the top
+    available_cameras.insert(0, {"id": "browser", "name": "Use Browser Camera (recommended for cloud)"})
+    
+    # If no cameras found at all, provide a message
+    if len(available_cameras) <= 1:  # Only has browser camera
+        available_cameras.append({"id": "no_cam", "name": "No physical cameras detected"})
     
     print(f"Found {len(available_cameras)} available cameras: {available_cameras}")
     return {"cameras": available_cameras}
@@ -2290,6 +2323,307 @@ async def resume_webcam():
     just_resumed = True  # Set flag to properly handle tracking after resume
     print("Webcam stream resumed")
     return {"success": True, "message": "Webcam resumed"}
+
+@app.post("/process_browser_frame")
+async def process_browser_frame(frame_data: Dict):
+    """Process a frame sent from the browser camera"""
+    global track_history, box_size_history, direction_history, speed_history, selected_object_id, robust_tracker
+    
+    try:
+        # Extract the base64 image data
+        base64_data = frame_data.get("frame", "").split(",")[1]
+        tracking_enabled = frame_data.get("tracking", True)
+        object_id = frame_data.get("object_id")
+        
+        # Set selected object ID if provided
+        if object_id is not None:
+            selected_object_id = object_id
+        
+        # Decode the base64 data
+        img_bytes = base64.b64decode(base64_data)
+        
+        # Convert to numpy array
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            return {"success": False, "error": "Invalid frame data"}
+        
+        # Resize frame to standard dimensions
+        frame = cv2.resize(frame, (STD_WIDTH, STD_HEIGHT), interpolation=cv2.INTER_AREA)
+        
+        # Process frame with detection/tracking based on settings
+        if tracking_enabled:
+            # Use the robust tracker if it exists for specific object tracking
+            if robust_tracker is not None and selected_object_id is not None:
+                success, pos = robust_tracker.update_webcam(frame)
+                if success:
+                    # Extract position
+                    x, y, w, h = pos
+                    
+                    # Add to tracking history
+                    track_id = 1  # Use a fixed track ID for robust tracker
+                    
+                    # Update trajectory
+                    track_history[track_id].append((float(x), float(y)))
+                    box_size_history[track_id].append((float(w), float(h)))
+                    
+                    # Limit trajectory history 
+                    if len(track_history[track_id]) > 90:  # Keep more points for webcam
+                        track_history[track_id].pop(0)
+                        box_size_history[track_id].pop(0)
+                    
+                    # Draw bounding box and track ID
+                    x1, y1 = int(x - w/2), int(y - h/2)
+                    x2, y2 = int(x + w/2), int(y + h/2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                    cv2.putText(frame, f"ID:{track_id}", (x1, y1 - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                    
+                    # Draw trajectory line - make it more prominent
+                    if len(track_history[track_id]) > 1:
+                        points = np.array(track_history[track_id], dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame, [points], False, (0, 255, 255), 2)
+                        
+                        # Calculate direction if we have enough history
+                        if len(track_history[track_id]) >= 5:
+                            # Use the last 5 points to calculate direction
+                            last_points = track_history[track_id][-5:]
+                            if len(last_points) >= 2:
+                                start_x, start_y = last_points[0]
+                                end_x, end_y = last_points[-1]
+                                
+                                # Calculate direction vector
+                                dir_x = end_x - start_x
+                                dir_y = end_y - start_y
+                                
+                                # Calculate direction angle in degrees
+                                angle = math.degrees(math.atan2(dir_y, dir_x))
+                                
+                                # Convert to compass direction
+                                if angle < 0:
+                                    angle += 360
+                                    
+                                # Map angle to cardinal direction
+                                directions = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+                                index = int((angle + 22.5) % 360 / 45)
+                                cardinal = directions[index]
+                                
+                                # Store direction
+                                direction_history[track_id] = cardinal
+                                
+                                # Calculate speed (pixels per frame)
+                                distance = math.sqrt(dir_x**2 + dir_y**2)
+                                frames = len(last_points) - 1
+                                speed_px = distance / frames if frames > 0 else 0
+                                
+                                # Store speed
+                                speed_history[track_id] = speed_px
+                                
+                                # Display direction and speed more prominently
+                                info_text = f"Dir: {cardinal}, Speed: {speed_px:.1f}"
+                                cv2.putText(frame, info_text, (x1, y2 + 20), 
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                                
+                                # Draw direction arrow
+                                arrow_length = 40
+                                arrow_end_x = int(x + dir_x * arrow_length / distance if distance > 0 else x)
+                                arrow_end_y = int(y + dir_y * arrow_length / distance if distance > 0 else y)
+                                cv2.arrowedLine(frame, (int(x), int(y)), (arrow_end_x, arrow_end_y), 
+                                             (0, 255, 255), 2, tipLength=0.3)
+            
+            # Run YOLO detection/tracking
+            results = model.track(frame, persist=True)
+        else:
+            # Just run detection without tracking
+            results = model(frame)
+        
+        # Process and draw bounding boxes 
+        if hasattr(results[0], 'boxes'):
+            # Process boxes - unified format across detection and tracking
+            boxes = results[0].boxes.xywh.cpu().numpy()  # center_x, center_y, width, height
+            classes = results[0].boxes.cls.cpu().numpy()
+            confidences = results[0].boxes.conf.cpu().numpy()
+            
+            # Check if tracking IDs are available
+            track_ids = None
+            if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None:
+                track_ids = results[0].boxes.id.cpu().numpy()
+                
+            # Draw boxes and tracking information
+            for i, box in enumerate(boxes):
+                x, y, w, h = box
+                cls = int(classes[i])
+                conf = confidences[i]
+                
+                # Skip this box if we're already tracking with the robust tracker
+                if robust_tracker is not None and selected_object_id is not None:
+                    # Simple IOU check to avoid duplicate boxes
+                    x1, y1 = int(x - w/2), int(y - h/2)
+                    x2, y2 = int(x + w/2), int(y + h/2)
+                    rob_x, rob_y, rob_w, rob_h = robust_tracker.get_position()
+                    rob_x1, rob_y1 = int(rob_x - rob_w/2), int(rob_y - rob_h/2)
+                    rob_x2, rob_y2 = int(rob_x + rob_w/2), int(rob_y + rob_h/2)
+                    
+                    # Calculate intersection
+                    ix1 = max(x1, rob_x1)
+                    iy1 = max(y1, rob_y1)
+                    ix2 = min(x2, rob_x2)
+                    iy2 = min(y2, rob_y2)
+                    
+                    if ix2 > ix1 and iy2 > iy1:
+                        # Boxes overlap, calculate IoU
+                        box_area = (x2 - x1) * (y2 - y1)
+                        rob_area = (rob_x2 - rob_x1) * (rob_y2 - rob_y1)
+                        intersection = (ix2 - ix1) * (iy2 - iy1)
+                        union = box_area + rob_area - intersection
+                        iou = intersection / union if union > 0 else 0
+                        
+                        if iou > 0.5:
+                            # Skip this box - it's likely the same object
+                            continue
+                
+                # Draw bounding box
+                x1, y1 = int(x - w/2), int(y - h/2)
+                x2, y2 = int(x + w/2), int(y + h/2)
+                
+                # Calculate color based on class
+                color = (0, 255, 0)  # Default green
+                
+                # If we have a track ID, use it for coloring and tracking
+                if track_ids is not None:
+                    track_id = int(track_ids[i])
+                    
+                    # Generate consistent color for this ID
+                    color_r = (track_id * 5) % 255
+                    color_g = (track_id * 10) % 255
+                    color_b = (track_id * 20) % 255
+                    color = (color_b, color_g, color_r)
+                    
+                    # Draw ID on the box
+                    cv2.putText(frame, f"ID:{track_id}", (x1, y1 - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    
+                    # If this is the specific object we're tracking, highlight it
+                    if selected_object_id is not None and track_id == selected_object_id and robust_tracker is None:
+                        # Highlight selected object
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                        
+                        # Draw trajectory
+                        track_history[track_id].append((float(x), float(y)))
+                        box_size_history[track_id].append((float(w), float(h)))
+                        
+                        # Limit trajectory history
+                        if len(track_history[track_id]) > 90:  # Keep more points for browser camera
+                            track_history[track_id].pop(0)
+                            box_size_history[track_id].pop(0)
+                            
+                        # Draw trajectory line
+                        points = np.array(track_history[track_id], dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame, [points], False, (0, 255, 255), 2)
+                        
+                        # Calculate direction if we have enough history
+                        if len(track_history[track_id]) >= 5:
+                            # Use the last 5 points to calculate direction
+                            last_points = track_history[track_id][-5:]
+                            if len(last_points) >= 2:
+                                start_x, start_y = last_points[0]
+                                end_x, end_y = last_points[-1]
+                                
+                                # Calculate direction vector
+                                dir_x = end_x - start_x
+                                dir_y = end_y - start_y
+                                
+                                # Calculate direction angle in degrees
+                                angle = math.degrees(math.atan2(dir_y, dir_x))
+                                
+                                # Convert to compass direction
+                                if angle < 0:
+                                    angle += 360
+                                    
+                                # Map angle to cardinal direction
+                                directions = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+                                index = int((angle + 22.5) % 360 / 45)
+                                cardinal = directions[index]
+                                
+                                # Store direction
+                                direction_history[track_id] = cardinal
+                                
+                                # Calculate speed (pixels per frame)
+                                distance = math.sqrt(dir_x**2 + dir_y**2)
+                                frames = len(last_points) - 1
+                                speed_px = distance / frames if frames > 0 else 0
+                                
+                                # Store speed
+                                speed_history[track_id] = speed_px
+                                
+                                # Display direction and speed
+                                info_text = f"Dir: {cardinal}, Speed: {speed_px:.1f}"
+                                cv2.putText(frame, info_text, (x1, y2 + 20), 
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                                
+                                # Draw direction arrow
+                                arrow_length = 40
+                                arrow_end_x = int(x + dir_x * arrow_length / distance if distance > 0 else x)
+                                arrow_end_y = int(y + dir_y * arrow_length / distance if distance > 0 else y)
+                                cv2.arrowedLine(frame, (int(x), int(y)), (arrow_end_x, arrow_end_y), 
+                                              (0, 255, 255), 2, tipLength=0.3)
+                else:
+                    # Regular box for other tracked objects
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                # Add processing mode label
+                mode_text = "Tracking" if tracking_enabled else "Detection"
+                if selected_object_id is not None:
+                    mode_text += f" (Tracking ID: {selected_object_id})"
+                    
+                cv2.putText(frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                cv2.putText(frame, "Browser Camera Mode", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                
+                # Convert back to base64 for response
+                _, buffer = cv2.imencode('.jpg', frame)
+                processed_frame = base64.b64encode(buffer).decode('utf-8')
+                
+                return {
+                    "success": True, 
+                    "processed_frame": f"data:image/jpeg;base64,{processed_frame}"
+                }
+    
+    except Exception as e:
+        print(f"Error processing browser frame: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@app.post("/browser_camera_frame")
+async def browser_camera_frame(file: UploadFile = File(...)):
+    """Process a frame sent from the browser camera"""
+    global webcam_frame_buffer, webcam_active
+    
+    try:
+        # Read the image data
+        contents = await file.read()
+        if not contents:
+            return {"success": False, "message": "Empty frame received"}
+        
+        # Convert to numpy array
+        nparr = np.frombuffer(contents, np.uint8)
+        
+        # Decode the image
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return {"success": False, "message": "Could not decode image"}
+        
+        # Update the webcam frame buffer
+        with webcam_lock:
+            webcam_frame_buffer = frame.copy()
+            
+        # Ensure webcam is marked as active
+        webcam_active = True
+        
+        return {"success": True}
+    except Exception as e:
+        print(f"Error processing browser camera frame: {e}")
+        return {"success": False, "message": str(e)}
 
 if __name__ == "__main__":
     # Run the app on all network interfaces on port 8000
