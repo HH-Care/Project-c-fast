@@ -193,6 +193,7 @@
             opacity: 0;
             transition: opacity 0.3s ease;
             display: block;
+            background: #000;
         }
 
         #videoFeed.active {
@@ -450,6 +451,11 @@
             border-radius: var(--border-radius);
             color: var(--light-gray);
         }
+
+        .processed-frame {
+            z-index: 2;
+            background-color: #000;
+        }
     </style>
   </head>
   <body>
@@ -528,7 +534,7 @@
         <!-- Right Video Display -->
     <div class="video-container">
             <div class="video-section">
-                <img id="videoFeed" src="" alt="Video Feed">
+                <video id="videoFeed" src="" alt="Video Feed"></video>
                 <canvas id="drawCanvas"></canvas>
                 <div class="drawing-controls">
                     <button id="confirmDrawBtn" style="display: block; min-width: 120px; margin: 0; padding: 8px 16px; font-size: 14px;">Confirm Selection</button>
@@ -573,6 +579,11 @@
         const confirmBtn = document.getElementById('confirmDrawBtn');
         const cancelBtn = document.getElementById('cancelDrawBtn');
         const ctx = drawCanvas.getContext('2d');
+
+        // Client-side webcam capture
+        let mediaStream = null;
+        let captureInterval = null;
+        const CAPTURE_INTERVAL_MS = 100; // 10 FPS
 
         function initializeCanvas() {
             drawCanvas.width = videoFeed.offsetWidth;
@@ -1185,174 +1196,260 @@
             statusText.textContent = status;
         }
         
-        // Start webcam stream
-        async function startWebcam() {
-            const cameraId = document.getElementById('cameraSelect').value;
-            const statusElem = document.getElementById('webcamStatus');
-            const videoStatusElem = document.getElementById('videoStatus');
-            
-            if (cameraId === "-1") {
-                statusElem.textContent = 'No cameras available';
-                videoStatusElem.textContent = 'No cameras available';
-                updateCameraStatus('No cameras available', false);
-                return;
-            }
-            
+        // Start client-side webcam capture
+        async function startClientWebcam() {
             try {
-                statusElem.textContent = 'Starting webcam...';
-                videoStatusElem.textContent = 'Starting webcam...';
+                const statusElem = document.getElementById('webcamStatus');
+                const videoStatusElem = document.getElementById('videoStatus');
+                
+                statusElem.textContent = 'Requesting webcam access...';
+                videoStatusElem.textContent = 'Requesting webcam access...';
                 updateCameraStatus('Connecting...', false);
+                
+                // Get user media
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 }
+                });
+                
+                // Create a video element to display the webcam
+                const videoElem = document.getElementById('videoFeed');
+                
+                // Set up the video element properly
+                videoElem.autoplay = true;
+                videoElem.muted = true;
+                videoElem.srcObject = mediaStream;
+                
+                // Handle any errors with the video element
+                videoElem.onerror = function(err) {
+                    console.error('Video element error:', err);
+                    statusElem.textContent = 'Error with video display: ' + err;
+                    videoStatusElem.textContent = 'Error with video display';
+                };
+                
+                // Wait for the video to be ready
+                await new Promise((resolve) => {
+                    videoElem.onloadedmetadata = resolve;
+                });
+                
+                // Start playing
+                try {
+                    await videoElem.play();
+                } catch (playError) {
+                    console.error('Error playing video:', playError);
+                    statusElem.textContent = 'Error starting video: ' + playError;
+                    throw playError;
+                }
+                
+                // Show video element, hide placeholder
+                document.getElementById('placeholder').style.display = 'none';
+                videoElem.style.display = 'block';
+                videoElem.classList.add('active');
+                
+                // Set up canvas for frame capture
+                const canvas = document.createElement('canvas');
+                canvas.width = 640;
+                canvas.height = 480;
+                const ctx = canvas.getContext('2d');
+                
+                // Function to capture and send frames
+                async function captureAndSendFrame() {
+                    const videoElem = document.getElementById('videoFeed');
+                    
+                    if (videoElem.readyState === 4 && !videoElem.paused && !videoElem.ended) {
+                        // Draw video frame to canvas
+                        ctx.drawImage(videoElem, 0, 0, canvas.width, canvas.height);
+                        
+                        // Convert to blob
+                        canvas.toBlob(async function(blob) {
+                            // Create form data with the frame
+                            const formData = new FormData();
+                            formData.append('frame', blob, 'frame.jpg');
+                            
+                            // Check if tracking is enabled
+                            const trackingEnabled = getTrackingEnabled();
+                            if (trackingEnabled) {
+                                formData.append('tracking', 'true');
+                                if (selectedObjectId) {
+                                    formData.append('object_id', selectedObjectId);
+                                }
+                            }
+                            
+                            try {
+                                // Send to server
+                                const response = await fetch('/client_webcam_frame', {
+                                    method: 'POST',
+                                    body: formData
+                                });
+                                
+                                if (response.ok) {
+                                    // Get processed frame and display it
+                                    const imageBlob = await response.blob();
+                                    const imageUrl = URL.createObjectURL(imageBlob);
+                                    
+                                    // Set source of video to the processed frame
+                                    const resultImg = document.createElement('img');
+                                    resultImg.onload = function() {
+                                        // Draw the processed image to the canvas
+                                        ctx.drawImage(resultImg, 0, 0, canvas.width, canvas.height);
+                                        
+                                        // Display the canvas content
+                                        // We'll use a temporary canvas to avoid flickering
+                                        const tempCanvas = document.createElement('canvas');
+                                        tempCanvas.width = canvas.width;
+                                        tempCanvas.height = canvas.height;
+                                        const tempCtx = tempCanvas.getContext('2d');
+                                        tempCtx.drawImage(canvas, 0, 0);
+                                        
+                                        // Convert the temp canvas to data URL and set as background
+                                        const displayDiv = document.createElement('div');
+                                        displayDiv.style.position = 'absolute';
+                                        displayDiv.style.top = '0';
+                                        displayDiv.style.left = '0';
+                                        displayDiv.style.width = '100%';
+                                        displayDiv.style.height = '100%';
+                                        displayDiv.style.backgroundImage = `url(${tempCanvas.toDataURL('image/jpeg')})`;
+                                        displayDiv.style.backgroundSize = 'contain';
+                                        displayDiv.style.backgroundPosition = 'center';
+                                        displayDiv.style.backgroundRepeat = 'no-repeat';
+                                        
+                                        // Clear previous display
+                                        const videoSection = document.querySelector('.video-section');
+                                        const oldDisplay = videoSection.querySelector('.processed-frame');
+                                        if (oldDisplay) {
+                                            videoSection.removeChild(oldDisplay);
+                                        }
+                                        
+                                        // Add new display
+                                        displayDiv.className = 'processed-frame';
+                                        videoSection.appendChild(displayDiv);
+                                    };
+                                    
+                                    resultImg.src = imageUrl;
+                                }
+                            } catch (error) {
+                                console.error('Error sending frame:', error);
+                            }
+                        }, 'image/jpeg', 0.8);
+                    }
+                }
+                
+                // Start capture loop
+                captureInterval = setInterval(captureAndSendFrame, CAPTURE_INTERVAL_MS);
+                
+                // Update UI
+                statusElem.textContent = 'Client webcam active';
+                videoStatusElem.textContent = 'Client webcam active: Ready for object detection and tracking';
+                statusElem.className = 'status success';
+                updateCameraStatus('Connected', true);
                 document.getElementById('startWebcamBtn').disabled = true;
+                document.getElementById('stopWebcamBtn').disabled = false;
                 
-                const formData = new FormData();
-                formData.append('camera_id', cameraId);
+                // Set current video to special webcam indicator
+                currentVideo = 'client-webcam';
+                isPlaying = true;
                 
-                const response = await fetch('/start_webcam', {
-                    method: 'POST',
-                    body: formData
-                });
+                // Update control buttons
+                updateControlButtons();
                 
-                if (!response.ok) {
-                    throw new Error(`HTTP error! Status: ${response.status}`);
-                }
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    statusElem.textContent = 'Webcam active: ' + data.message;
-                    videoStatusElem.textContent = 'Webcam active: Ready for object detection and tracking';
-                    statusElem.className = 'status success';
-                    updateCameraStatus('Connected', true);
-                    document.getElementById('startWebcamBtn').disabled = true;
-                    document.getElementById('stopWebcamBtn').disabled = false;
-                    
-                    // Update video feed source
-                    const videoElem = document.getElementById('videoFeed');
-                    const trackingEnabled = getTrackingEnabled();
-                    
-                    // Show video element, hide placeholder
-                    document.getElementById('placeholder').style.display = 'none';
-                    videoElem.style.display = 'block';
-                    
-                    // Set current video to special webcam indicator
-                    currentVideo = 'webcam';
-                    isPlaying = true;
-                    
-                    // Update control buttons
-                    updateControlButtons();
-                    
-                    // Set source to webcam feed with tracking parameters
-                    const webcamUrl = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}`;
-                    console.log("Setting webcam URL to:", webcamUrl);
-                    videoElem.src = webcamUrl;
-                    videoElem.classList.add('active');
-                    
-                    // Set up error handling for video feed
-                    videoElem.onerror = function() {
-                        console.error("Error loading webcam feed");
-                        statusElem.textContent = 'Error receiving webcam feed';
-                        videoStatusElem.textContent = 'Error receiving webcam feed';
-                        statusElem.className = 'status error';
-                        updateCameraStatus('Error', false);
-                        // Try to recover
-                        retryWebcamFeed(3);
-                    };
-                } else {
-                    document.getElementById('startWebcamBtn').disabled = false;
-                    statusElem.textContent = `Error: ${data.message}`;
-                    videoStatusElem.textContent = `Error: ${data.message}`;
-                    statusElem.className = 'status error';
-                    updateCameraStatus('Connection failed', false);
-                }
             } catch (error) {
-                console.error('Error starting webcam:', error);
+                console.error('Error accessing webcam:', error);
+                document.getElementById('webcamStatus').textContent = 'Error accessing webcam: ' + error.message;
+                document.getElementById('videoStatus').textContent = 'Error accessing webcam: ' + error.message;
+                updateCameraStatus('Error', false);
                 document.getElementById('startWebcamBtn').disabled = false;
-                statusElem.textContent = 'Failed to start webcam: ' + error.message;
-                videoStatusElem.textContent = 'Failed to start webcam: ' + error.message;
-                statusElem.className = 'status error';
-                updateCameraStatus('Connection failed', false);
             }
         }
         
-        // Retry webcam feed if it fails
-        async function retryWebcamFeed(retriesLeft) {
-            if (retriesLeft <= 0) {
-                document.getElementById('webcamStatus').textContent = 'Could not connect to webcam after retries';
-                document.getElementById('videoStatus').textContent = 'Could not connect to webcam after multiple attempts';
-                document.getElementById('startWebcamBtn').disabled = false;
-                document.getElementById('stopWebcamBtn').disabled = true;
-                return;
+        // Stop client-side webcam
+        function stopClientWebcam() {
+            // Stop the media stream
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
             }
             
-            console.log(`Retrying webcam feed, ${retriesLeft} attempts left`);
-            document.getElementById('videoStatus').textContent = `Reconnecting to webcam (${retriesLeft} attempts left)...`;
+            // Clear capture interval
+            if (captureInterval) {
+                clearInterval(captureInterval);
+                captureInterval = null;
+            }
             
-            // Wait a moment before retry
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            
+            // Clear video feed
             const videoElem = document.getElementById('videoFeed');
-            const trackingEnabled = getTrackingEnabled();
+            videoElem.srcObject = null;
+            videoElem.pause();  // Properly pause the video element
+            videoElem.src = '';
+            videoElem.classList.remove('active');
             
-            // Add timestamp to URL to prevent caching
-            const timestamp = new Date().getTime();
-            videoElem.src = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}&t=${timestamp}`;
+            // Show placeholder
+            document.getElementById('placeholder').style.display = 'block';
+            videoElem.style.display = 'none';
             
-            videoElem.onerror = function() {
-                retryWebcamFeed(retriesLeft - 1);
-            };
+            // Update UI
+            document.getElementById('webcamStatus').textContent = 'Webcam stopped';
+            document.getElementById('videoStatus').textContent = 'Webcam stopped';
+            updateCameraStatus('Not connected', false);
+            document.getElementById('startWebcamBtn').disabled = false;
+            document.getElementById('stopWebcamBtn').disabled = true;
+            
+            // Reset flags
+            currentVideo = null;
+            isPlaying = false;
+            
+            // Update control buttons
+            updateControlButtons();
+            
+            // Tell server to clean up resources
+            fetch('/stop_client_webcam', { method: 'POST' })
+                .catch(error => console.error('Error stopping client webcam on server:', error));
         }
         
-        // Stop webcam stream
-        async function stopWebcam() {
-            const statusElem = document.getElementById('webcamStatus');
-            const videoStatusElem = document.getElementById('videoStatus');
-            
-            try {
-                statusElem.textContent = 'Stopping webcam...';
-                videoStatusElem.textContent = 'Stopping webcam...';
-                statusElem.className = 'status';
-                updateCameraStatus('Disconnecting...', false);
-                
-                const response = await fetch('/stop_webcam', {
-                    method: 'POST'
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    statusElem.textContent = 'Webcam stopped';
-                    videoStatusElem.textContent = 'Webcam stopped';
-                    statusElem.className = 'status';
-                    updateCameraStatus('Disconnected', false);
-                    document.getElementById('startWebcamBtn').disabled = false;
-                    document.getElementById('stopWebcamBtn').disabled = true;
-                    
-                    // Hide video feed
-                    const videoElem = document.getElementById('videoFeed');
-                    videoElem.src = '';
-                    videoElem.classList.remove('active');
-                    
-                    // Reset video state
-                    currentVideo = null;
-                    isPlaying = false;
-                    updateControlButtons();
-                    
-                    // Show placeholder
-                    document.getElementById('placeholder').style.display = 'block';
-                    videoElem.style.display = 'none';
-                    
-                    // Reset selected object
-                    selectedObjectId = null;
-                } else {
-                    statusElem.textContent = `Error: ${data.message}`;
-                    videoStatusElem.textContent = `Error: ${data.message}`;
-                    statusElem.className = 'status warning';
-                }
-            } catch (error) {
-                console.error('Error stopping webcam:', error);
-                statusElem.textContent = 'Failed to stop webcam: ' + error.message;
-                videoStatusElem.textContent = 'Failed to stop webcam: ' + error.message;
-                statusElem.className = 'status error';
+        // Update the startWebcam function to use client-side webcam
+        async function startWebcam() {
+            // Use browser webcam instead of server webcam
+            startClientWebcam();
+        }
+        
+        // Update the stopWebcam function
+        function stopWebcam() {
+            if (currentVideo === 'client-webcam') {
+                stopClientWebcam();
+            } else {
+                // Original stopWebcam code for server-side webcam
+                fetch('/stop_webcam', { method: 'POST' })
+                    .then(response => response.json())
+                    .then(data => {
+                        const statusElem = document.getElementById('webcamStatus');
+                        const videoStatusElem = document.getElementById('videoStatus');
+                        
+                        if (data.success) {
+                            statusElem.textContent = 'Webcam stopped: ' + data.message;
+                            videoStatusElem.textContent = 'Webcam stopped';
+                            statusElem.className = 'status';
+                            document.getElementById('startWebcamBtn').disabled = false;
+                            document.getElementById('stopWebcamBtn').disabled = true;
+                            updateCameraStatus('Not connected', false);
+                            
+                            // Reset video source
+                            const videoElem = document.getElementById('videoFeed');
+                            videoElem.src = '';
+                            videoElem.classList.remove('active');
+                            document.getElementById('placeholder').style.display = 'block';
+                            videoElem.style.display = 'none';
+                            
+                            // Reset state
+                            currentVideo = null;
+                            isPlaying = false;
+                            updateControlButtons();
+                        } else {
+                            statusElem.textContent = 'Error stopping webcam: ' + data.message;
+                            statusElem.className = 'status error';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error stopping webcam:', error);
+                        document.getElementById('webcamStatus').textContent = 'Error stopping webcam';
+                    });
             }
         }
 
