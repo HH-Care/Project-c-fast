@@ -1819,14 +1819,22 @@ async def start_webcam(camera_id: int = Form(0)):
 @app.post("/stop_webcam")
 async def stop_webcam():
     """Stop webcam stream"""
-    global webcam_active, webcam_thread
+    global webcam_active, webcam_thread, webcam_frame_buffer
     
     if webcam_active and webcam_thread and webcam_thread.is_alive():
         webcam_active = False
         webcam_thread.join(timeout=2.0)
+        print("Server-side webcam stream stopped")
         return {"success": True, "message": "Webcam stream stopped"}
     
-    return {"success": False, "message": "No active webcam stream to stop"}
+    # Even if no server-side webcam was running, clean up the frame buffer
+    # This is important for client-side webcam scenarios
+    with webcam_lock:
+        webcam_frame_buffer = None
+        webcam_active = False
+        print("Client-side webcam resources cleaned up")
+        
+    return {"success": True, "message": "Webcam resources cleaned"}
 
 @app.get("/webcam_feed")
 async def webcam_feed(
@@ -1871,7 +1879,17 @@ async def get_available_cameras():
     """Get list of available camera devices"""
     available_cameras = []
     
-    # More robust camera detection
+    # Check if we're running on a server (like EC2) with no access to physical cameras
+    server_environment = os.environ.get('SERVER_ENVIRONMENT', '').lower() == 'true' or os.path.exists('/etc/ec2_version')
+    
+    # If we're on a server, provide a virtual camera option
+    if server_environment:
+        # Return a virtual camera for browser-based capture
+        available_cameras.append({"id": 0, "name": "Browser Camera (Client-Side Capture)"})
+        print(f"Running in server environment, providing browser camera option")
+        return {"cameras": available_cameras}
+    
+    # Try to find physical cameras on the system
     for i in range(5):  # Check first 5 indices
         try:
             cap = cv2.VideoCapture(i, cv2.CAP_ANY)  # Use CAP_ANY to be more flexible
@@ -1885,6 +1903,11 @@ async def get_available_cameras():
         except Exception as e:
             print(f"Error checking camera {i}: {e}")
             # Continue to next camera index
+    
+    # If no physical cameras were found, provide the browser camera option
+    if not available_cameras:
+        available_cameras.append({"id": 0, "name": "Browser Camera (Client-Side Capture)"})
+        print("No physical cameras found, providing browser camera option")
     
     print(f"Found {len(available_cameras)} available cameras: {available_cameras}")
     return {"cameras": available_cameras}
@@ -2294,21 +2317,43 @@ async def resume_webcam():
 @app.post("/webcam_frame_upload")
 async def webcam_frame_upload(frame_data: UploadFile = File(...)):
     """Receive webcam frame from client browser"""
-    global webcam_frame_buffer
+    global webcam_frame_buffer, webcam_active
     
     try:
+        print("Received frame upload from client browser")
+        
+        # Activate webcam mode if not already active
+        if not webcam_active:
+            webcam_active = True
+            print("Activating webcam mode for client uploads")
+        
         contents = await frame_data.read()
+        if not contents:
+            print("Error: Received empty frame data")
+            return {"success": False, "message": "Empty frame data"}
+            
         nparr = np.frombuffer(contents, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        if frame is not None:
-            with webcam_lock:
-                webcam_frame_buffer = frame.copy()
-            return {"success": True}
-        else:
+        if frame is None:
+            print("Error: Could not decode image from uploaded data")
             return {"success": False, "message": "Could not decode image"}
+            
+        if frame.size == 0:
+            print("Error: Decoded frame has zero size")
+            return {"success": False, "message": "Zero-sized frame"}
+        
+        # Print frame info for debugging
+        print(f"Received frame with shape: {frame.shape}")
+        
+        with webcam_lock:
+            webcam_frame_buffer = frame.copy()
+            
+        return {"success": True, "message": "Frame received"}
     except Exception as e:
+        import traceback
         print(f"Error processing uploaded frame: {e}")
+        traceback.print_exc()
         return {"success": False, "message": str(e)}
 
 if __name__ == "__main__":

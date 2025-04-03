@@ -32,7 +32,8 @@ if [ ! -f "models/best.pt" ]; then
 fi
 
 # Start the application
-echo "Starting server on port 8000..."
+echo "Starting server on port 8000 in SERVER mode..."
+export SERVER_ENVIRONMENT=true
 python -c "import uvicorn; import main; uvicorn.run(main.app, host='0.0.0.0', port=8000)"
 
 echo "Server stopped." 

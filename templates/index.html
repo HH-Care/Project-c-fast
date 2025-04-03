@@ -1467,54 +1467,102 @@
                     }
                 };
                 
-                // Try to get the stream
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                clientWebcamStream = stream;
+                // Show permission notification
+                statusElem.textContent = 'Please allow camera access in your browser...';
+                videoStatusElem.textContent = 'Please allow camera access in your browser...';
                 
-                // Set up video element
-                const video = document.getElementById('clientWebcam');
-                video.srcObject = stream;
-                
-                // Set up canvas for frame capture
-                const canvas = document.getElementById('clientCanvas');
-                canvas.width = 1280;
-                canvas.height = 720;
-                
-                // Mark webcam as active
-                isClientWebcamActive = true;
-                
-                // Start sending frames to server
-                clientWebcamInterval = setInterval(captureAndSendFrame, 100); // 10 FPS
-                
-                // Update UI
-                statusElem.textContent = 'Client webcam active';
-                videoStatusElem.textContent = 'Client webcam active: Ready for object detection and tracking';
-                statusElem.className = 'status success';
-                updateCameraStatus('Connected', true);
-                document.getElementById('startWebcamBtn').disabled = true;
-                document.getElementById('stopWebcamBtn').disabled = false;
-                
-                // Show video element, hide placeholder
-                document.getElementById('placeholder').style.display = 'none';
-                document.getElementById('videoFeed').style.display = 'block';
-                
-                // Set current video to special webcam indicator
-                currentVideo = 'webcam';
-                isPlaying = true;
-                
-                // Update control buttons
-                updateControlButtons();
-                
-                // Set source to webcam feed with tracking parameters
-                const trackingEnabled = getTrackingEnabled();
-                const webcamUrl = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}`;
-                console.log("Setting webcam URL to:", webcamUrl);
-                document.getElementById('videoFeed').src = webcamUrl;
-                document.getElementById('videoFeed').classList.add('active');
+                try {
+                    // Try to get the stream
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    clientWebcamStream = stream;
+                    
+                    // Set up video element
+                    const video = document.getElementById('clientWebcam');
+                    video.srcObject = stream;
+                    
+                    // Set up canvas for frame capture
+                    const canvas = document.getElementById('clientCanvas');
+                    canvas.width = 1280;
+                    canvas.height = 720;
+                    
+                    // Wait for video to be ready
+                    await new Promise(resolve => {
+                        video.onloadedmetadata = () => {
+                            video.play();
+                            resolve();
+                        };
+                        // Timeout to prevent waiting forever
+                        setTimeout(resolve, 3000);
+                    });
+                    
+                    // Mark webcam as active
+                    isClientWebcamActive = true;
+                    
+                    // Verify we can capture a frame before continuing
+                    const testCtx = canvas.getContext('2d');
+                    testCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    
+                    // Start sending frames to server
+                    clientWebcamInterval = setInterval(captureAndSendFrame, 100); // 10 FPS
+                    
+                    // Update UI
+                    statusElem.textContent = 'Client webcam active';
+                    videoStatusElem.textContent = 'Client webcam active: Ready for object detection and tracking';
+                    statusElem.className = 'status success';
+                    updateCameraStatus('Connected', true);
+                    document.getElementById('startWebcamBtn').disabled = true;
+                    document.getElementById('stopWebcamBtn').disabled = false;
+                    
+                    // Show video element, hide placeholder
+                    document.getElementById('placeholder').style.display = 'none';
+                    document.getElementById('videoFeed').style.display = 'block';
+                    
+                    // Set current video to special webcam indicator
+                    currentVideo = 'webcam';
+                    isPlaying = true;
+                    
+                    // Update control buttons
+                    updateControlButtons();
+                    
+                    // Send an initial frame to the server before loading the feed
+                    await captureAndSendFrame();
+                    
+                    // Short delay to ensure server has received the first frame
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    // Set source to webcam feed with tracking parameters
+                    const trackingEnabled = getTrackingEnabled();
+                    const webcamUrl = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}`;
+                    console.log("Setting webcam URL to:", webcamUrl);
+                    document.getElementById('videoFeed').src = webcamUrl;
+                    document.getElementById('videoFeed').classList.add('active');
+                    
+                    // Add error handler
+                    document.getElementById('videoFeed').onerror = function() {
+                        console.error("Error with webcam feed");
+                        retryWebcamFeed(3);
+                    };
+                    
+                } catch (err) {
+                    // Handle permission denied errors specifically
+                    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                        console.error('Camera permission denied:', err);
+                        statusElem.textContent = 'Error: Camera access denied by user';
+                        videoStatusElem.textContent = 'Camera permission denied. Please allow camera access and try again.';
+                        statusElem.className = 'status error';
+                        updateCameraStatus('Permission denied', false);
+                        document.getElementById('startWebcamBtn').disabled = false;
+                    } else {
+                        throw err; // Re-throw for the outer catch
+                    }
+                }
             } catch (error) {
                 console.error('Error starting client webcam:', error);
+                const statusElem = document.getElementById('webcamStatus');
                 statusElem.textContent = 'Error starting client webcam: ' + error.message;
+                statusElem.className = 'status error';
                 updateCameraStatus('Error', false);
+                document.getElementById('startWebcamBtn').disabled = false;
             }
         }
 
@@ -1545,31 +1593,48 @@
         }
 
         async function captureAndSendFrame() {
-            if (!isClientWebcamActive || !clientWebcamStream) return;
+            if (!isClientWebcamActive || !clientWebcamStream) return false;
             
-            const video = document.getElementById('clientWebcam');
-            const canvas = document.getElementById('clientCanvas');
-            const ctx = canvas.getContext('2d');
-            
-            // Draw video frame to canvas
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            // Convert canvas to blob
-            canvas.toBlob(async (blob) => {
-                // Create form data
-                const formData = new FormData();
-                formData.append('frame_data', blob, 'frame.jpg');
+            try {
+                const video = document.getElementById('clientWebcam');
+                const canvas = document.getElementById('clientCanvas');
+                const ctx = canvas.getContext('2d');
                 
-                // Send to server
-                try {
-                    await fetch('/webcam_frame_upload', {
-                        method: 'POST',
-                        body: formData
-                    });
-                } catch (error) {
-                    console.error('Error sending frame to server:', error);
-                }
-            }, 'image/jpeg', 0.85); // JPEG at 85% quality
+                // Draw video frame to canvas
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                // Create a promise to handle the blob conversion
+                return new Promise((resolve, reject) => {
+                    canvas.toBlob(async (blob) => {
+                        if (!blob) {
+                            console.error("Failed to create blob from canvas");
+                            resolve(false);
+                            return;
+                        }
+                        
+                        // Create form data
+                        const formData = new FormData();
+                        formData.append('frame_data', blob, 'frame.jpg');
+                        
+                        // Send to server
+                        try {
+                            const response = await fetch('/webcam_frame_upload', {
+                                method: 'POST',
+                                body: formData
+                            });
+                            
+                            const result = await response.json();
+                            resolve(result.success);
+                        } catch (error) {
+                            console.error('Error sending frame to server:', error);
+                            resolve(false);
+                        }
+                    }, 'image/jpeg', 0.85); // JPEG at 85% quality
+                });
+            } catch (error) {
+                console.error('Error in captureAndSendFrame:', error);
+                return false;
+            }
         }
     </script>
   </body>
