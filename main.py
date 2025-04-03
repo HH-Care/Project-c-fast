@@ -1465,7 +1465,10 @@ async def startup_event():
     print("To stop the server:")
     print("1. Press 'q' in the terminal")
     print("2. Or visit http://localhost:8000/shutdown in your browser")
-    print("3. Or use the 'Shutdown Server' button in the web interface")
+    print("3. Or use Ctrl+C in the terminal")
+    print("\nTo clear data without stopping the server:")
+    print("1. Use the 'Clear Data' button in the web interface")
+    print("2. Or visit http://localhost:8000/clear_data with a POST request")
     print("="*50 + "\n")
     
     # Start a thread to listen for 'q' in the terminal
@@ -2624,6 +2627,107 @@ async def browser_camera_frame(file: UploadFile = File(...)):
     except Exception as e:
         print(f"Error processing browser camera frame: {e}")
         return {"success": False, "message": str(e)}
+
+@app.post("/clear_data")
+async def clear_data():
+    """Clear all uploaded videos and cached data without shutting down the server"""
+    global track_history, box_size_history, direction_history, speed_history, selected_object_id
+    global current_video_path, webcam_frame_buffer, process_video
+    
+    try:
+        print("Starting comprehensive data cleanup...")
+        
+        # Reset tracking states
+        print("Resetting tracking data and application state...")
+        reset_tracking_data()
+        
+        # Reset video-related variables
+        current_video_path = None
+        selected_object_id = None
+        
+        # Reset frame index for video processing
+        if hasattr(process_video, 'current_frame_index'):
+            process_video.current_frame_index = 0
+        
+        if hasattr(process_video, 'current_frame'):
+            process_video.current_frame = None
+        
+        # Reset webcam buffer if active
+        if webcam_active:
+            with webcam_lock:
+                webcam_frame_buffer = None
+        
+        # Clear PyTorch CUDA cache if using GPU
+        if torch.cuda.is_available():
+            print("Clearing CUDA cache...")
+            torch.cuda.empty_cache()
+        
+        # Clear uploaded videos
+        video_files = list(UPLOAD_DIR.glob("*"))
+        initial_count = len(video_files)
+        print(f"Clearing uploads: Found {initial_count} files to clean up")
+        
+        # Delete all files in uploads directory
+        deleted_count = 0
+        for file in video_files:
+            try:
+                print(f"Deleting {file}")
+                file.unlink(missing_ok=True)  # Python 3.8+ supports missing_ok
+                deleted_count += 1
+            except Exception as e:
+                print(f"Error deleting {file}: {e}")
+        
+        # Clear temporary files
+        temp_dir = Path("./temp")
+        if temp_dir.exists():
+            print("Clearing temporary files...")
+            temp_files = list(temp_dir.glob("*"))
+            for file in temp_files:
+                try:
+                    if file.is_file():
+                        file.unlink(missing_ok=True)
+                    elif file.is_dir():
+                        shutil.rmtree(file, ignore_errors=True)
+                except Exception as e:
+                    print(f"Error deleting temp file {file}: {e}")
+        
+        # Check for OS-specific temp directories
+        if sys.platform == 'win32':
+            # Windows TEMP files related to our app
+            win_temp = Path(os.environ.get('TEMP', '') or os.environ.get('TMP', ''))
+            if win_temp.exists():
+                for file in win_temp.glob("yolo_*"):
+                    try:
+                        if file.is_file():
+                            file.unlink(missing_ok=True)
+                    except Exception as e:
+                        print(f"Error deleting Windows temp file {file}: {e}")
+        
+        # Verify uploads cleanup
+        remaining = list(UPLOAD_DIR.glob("*"))
+        if remaining:
+            print(f"Warning: {len(remaining)} upload files could not be deleted")
+            message = f"Cleared {deleted_count} out of {initial_count} files. {len(remaining)} files could not be deleted."
+        else:
+            print("All uploaded files cleaned up successfully")
+            message = f"Successfully cleared all data ({deleted_count} files removed)."
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        print("Data cleanup complete")
+        return {"success": True, "message": message}
+    
+    except Exception as e:
+        print(f"Error clearing data: {e}")
+        return {"success": False, "message": f"Error clearing data: {str(e)}"}
+
+@app.get("/clear_data")
+async def clear_data_get():
+    """GET method to clear all data (for direct browser access)"""
+    # Delegate to the POST method implementation
+    return await clear_data()
 
 if __name__ == "__main__":
     # Run the app on all network interfaces on port 8000
