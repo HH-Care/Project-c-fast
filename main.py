@@ -63,55 +63,26 @@ class BoundingBox(BaseModel):
     width: float
     height: float
 
-# Function to safely load the YOLO model
-def load_yolo_model(model_path):
-    try:
-        # Try to load with default settings first
-        model = YOLO(model_path)
-        # model = YOLO("yolo11n.pt")
-        
-        # Prepare model for inference without fusion
-        dummy_img = np.zeros((STD_HEIGHT, STD_WIDTH, 3), dtype=np.uint8)
-        _ = model(dummy_img, verbose=False)  # Run once to initialize
-        
-        # Check if CUDA is available and use it
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model.to(device)
-        print(f"Model loaded successfully on {device}")
-        return model
-    
-    except Exception as e:
-        print(f"Error loading model with default settings: {e}")
-        print("Trying alternative loading method...")
-        
-        # Alternative: Load as PyTorch model directly
-        try:
-            weights = torch.load(model_path, map_location='cpu')
-            model = YOLO(model_path)
-            model.model = weights['model'].float()
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            model.to(device)
-            print(f"Model loaded with alternative method on {device}")
-            return model
-        except Exception as e2:
-            print(f"Failed to load model: {e2}")
-            raise
-
 # Load the YOLO model
 try:
-    # Set CUDA device settings for optimal performance
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()  # Clear GPU cache before loading model
-        # Configure PyTorch for better memory management
-        torch.backends.cudnn.benchmark = True
-        
-    model = load_yolo_model("models/100.pt")
+    MODEL_PATH = "best_openvino_model/"# Use resolved path
+    YOLO_FALLBACK_PATH = "yolov8n.pt" # Ultralytics usually handles caching this
+
+    print(f"Attempting to load model from: {MODEL_PATH}")
+    # Load OpenVINO model directly with YOLO class instead of load_yolo_model function
+    
+    model = YOLO(MODEL_PATH, task='detect')  # Explicitly specify task as 'detect'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Don't call model.to(device) as it's not supported for OpenVINO format
+    # Instead, we'll pass the device in the predict calls
+    print(f"OpenVINO model loaded successfully")
+
 except Exception as e:
     print(f"Critical error loading model: {e}")
     print("Using basic YOLO model as fallback")
     model = YOLO("yolov8n.pt")  # Use a standard model as fallback
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
+    model.to(device)  # This works for PyTorch models
 
 # Store the track history
 track_history = defaultdict(list)
@@ -254,7 +225,7 @@ class RobustObjectTracker:
         """Simple update for webcam mode - just run YOLO to get detections"""
         try:
             # Run YOLO detection on the frame
-            results = model(frame)
+            results = model.predict(frame, device=device)
             
             # Process the detections
             if hasattr(results[0], 'boxes') and len(results[0].boxes) > 0:
@@ -487,7 +458,7 @@ def reset_tracking_cache():
     # Force reset of tracking buffer by running inference once on a dummy frame
     dummy_frame = np.zeros((STD_HEIGHT, STD_WIDTH, 3), dtype=np.uint8)
     try:
-        model(dummy_frame, verbose=False)
+        model.predict(dummy_frame, verbose=False, device=device)
     except:
         pass
 
@@ -675,7 +646,7 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
                         tracking_box = bbox  # Use as-is if not in expected format
                     
                     print(f"Initializing tracking with box: {tracking_box}")
-                    results = model.track(frame, persist=True, boxes=[tracking_box])
+                    results = model.track(frame, persist=True, boxes=[tracking_box], device=device)
                     
                     # After first frame, convert selected_object_id to track ID
                     if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None:
@@ -695,7 +666,7 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
                             results = model(frame)
                 else:
                     # Continue tracking with existing ID
-                    results = model.track(frame, persist=True)
+                    results = model.track(frame, persist=True, device=device)
             else:
                 # Use detection only if tracking is disabled or no object selected
                 results = model(frame)
@@ -2112,9 +2083,9 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                                                  (0, 255, 255), 2, tipLength=0.3)
                     
                 # Also run YOLOv8 tracking to detect other objects
-                results = model.track(frame, persist=True)
+                results = model.track(frame, persist=True, device=device)
             else:
-                results = model(frame)
+                results = model.predict(frame, device=device)
                 
             # Process results for visualization
             # Get bounding boxes, classes and tracking IDs
@@ -2436,10 +2407,10 @@ async def process_browser_frame(frame_data: Dict):
                                              (0, 255, 255), 2, tipLength=0.3)
             
             # Run YOLO detection/tracking
-            results = model.track(frame, persist=True)
+            results = model.track(frame, persist=True, device=device)
         else:
             # Just run detection without tracking
-            results = model(frame)
+            results = model.predict(frame, device=device)
         
         # Process and draw bounding boxes 
         if hasattr(results[0], 'boxes'):
