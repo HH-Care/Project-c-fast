@@ -2,7 +2,10 @@ fastapi==0.115.12
 Jinja2==3.1.6
 opencv-python==4.11.0.86
 opencv-python-headless==4.11.0.86
-ultralytics==8.3.98
+ultralytics<=8.3.40
 uvicorn==0.34.0
 python-multipart
 lap==0.5.12
+openvino>=2024.5.0
+openvino-telemetry>=2023.2.1
+python-multipart==0.0.20
