@@ -68,6 +68,10 @@ try:
     MODEL_PATH = "final_model_openvino_model/"# Use resolved path
     YOLO_FALLBACK_PATH = "yolov8n.pt" # Ultralytics usually handles caching this
 
+    # Force OpenVINO to use GPU backend
+    os.environ["OPENVINO_FORCE_BACKEND"] = "GPU"
+    print("Setting OpenVINO to use GPU backend")
+    
     print(f"Attempting to load model from: {MODEL_PATH}")
     # Load OpenVINO model directly with YOLO class instead of load_yolo_model function
     
@@ -76,6 +80,12 @@ try:
     # Don't call model.to(device) as it's not supported for OpenVINO format
     # Instead, we'll pass the device in the predict calls
     print(f"OpenVINO model loaded successfully")
+
+    # Warm up the model with a dummy frame to trigger compilation
+    print("Warming up model on GPU...")
+    dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    _ = model.predict(dummy_frame, device=device, half=True)
+    print("Model warmed up successfully")
 
 except Exception as e:
     print(f"Critical error loading model: {e}")
@@ -225,7 +235,7 @@ class RobustObjectTracker:
         """Simple update for webcam mode - just run YOLO to get detections"""
         try:
             # Run YOLO detection on the frame
-            results = model.predict(frame, device=device)
+            results = model.predict(frame, device=device, half=True)
             
             # Process the detections
             if hasattr(results[0], 'boxes') and len(results[0].boxes) > 0:
@@ -453,14 +463,16 @@ pixels_per_meter = 100  # Calibration for speed calculation
 
 # Fix for OpenCV tracking issues with pyramid sizes
 def reset_tracking_cache():
-    """Reset any cached tracking data between frames to avoid pyramid size errors"""
-    global model
-    # Force reset of tracking buffer by running inference once on a dummy frame
-    dummy_frame = np.zeros((STD_HEIGHT, STD_WIDTH, 3), dtype=np.uint8)
-    try:
-        model.predict(dummy_frame, verbose=False, device=device)
-    except:
-        pass
+    """Clear tracking history for a fresh start"""
+    global track_history, box_size_history, direction_history, speed_history
+    track_history = defaultdict(list)
+    box_size_history = defaultdict(list)
+    direction_history = {}
+    speed_history = {}
+    
+    # Warm up the model with a dummy frame
+    dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    model.predict(dummy_frame, verbose=False, device=device, half=True)
 
 def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int] = None, start_frame: int = 0):
     """Process the uploaded video and yield frames with detection/tracking"""
@@ -646,7 +658,13 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
                         tracking_box = bbox  # Use as-is if not in expected format
                     
                     print(f"Initializing tracking with box: {tracking_box}")
-                    results = model.track(frame, persist=True, boxes=[tracking_box], device=device)
+                    # Run detection on the current frame
+                    if tracking_box is not None:
+                        # If we have a tracking box, use it to guide the tracker
+                        results = model.track(frame, persist=True, boxes=[tracking_box], device=device, half=True)
+                    else:
+                        # Otherwise, track all objects
+                        results = model.track(frame, persist=True, device=device, half=True)
                     
                     # After first frame, convert selected_object_id to track ID
                     if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None:
@@ -663,13 +681,13 @@ def process_video(filename: str, use_tracking: bool = True, obj_id: Optional[int
                         else:
                             print("No track ID assigned, retrying detection")
                             # If tracking failed, try detection again
-                            results = model(frame)
+                            results = model(frame, device=device, half=True)
                 else:
                     # Continue tracking with existing ID
-                    results = model.track(frame, persist=True, device=device)
+                    results = model.track(frame, persist=True, device=device, half=True)
             else:
                 # Use detection only if tracking is disabled or no object selected
-                results = model(frame)
+                results = model(frame, device=device, half=True)
                 
                 # When in detection mode, we need to ignore the selected_object_id
                 # so that all detected objects are shown
@@ -2086,9 +2104,9 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                                                  (0, 255, 255), 2, tipLength=0.3)
                     
                 # Also run YOLOv8 tracking to detect other objects
-                results = model.track(frame, persist=True, device=device)
+                results = model.track(frame, persist=True, device=device, half=True)
             else:
-                results = model.predict(frame, device=device)
+                results = model.predict(frame, device=device, half=True)
                 
             # Process results for visualization
             # Get bounding boxes, classes and tracking IDs
@@ -2410,10 +2428,10 @@ async def process_browser_frame(frame_data: Dict):
                                              (0, 255, 255), 2, tipLength=0.3)
             
             # Run YOLO detection/tracking
-            results = model.track(frame, persist=True, device=device)
+            results = model.track(frame, persist=True, device=device, half=True)
         else:
             # Just run detection without tracking
-            results = model.predict(frame, device=device)
+            results = model.predict(frame, device=device, half=True)
         
         # Process and draw bounding boxes 
         if hasattr(results[0], 'boxes'):
