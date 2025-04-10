@@ -164,6 +164,9 @@ class RobustObjectTracker:
         self.lost_frames = 0
         self.max_lost_frames = 30  # How long to keep predicting position
         self.prediction_only = False
+        self.last_known_center = None  # To store the last known center of the object
+        self.constant_id = object_id  # This ID remains constant regardless of detector changes
+        self.id_aliases = set()  # Set of detector IDs that have been mapped to this object
         
         # Initialize with frame and box if provided
         if initial_box is not None and frame is not None:
@@ -173,6 +176,7 @@ class RobustObjectTracker:
         """Update the reference features for this object"""
         x, y, w, h = box
         self.last_position = (x, y)
+        self.last_known_center = (x, y)  # Keep track of last known center
         self.last_size = (w, h)
         self.reference_features = extract_features(frame, box)
         
@@ -213,6 +217,40 @@ class RobustObjectTracker:
         predicted_pos = self.predict_position()
         
         for i, (box, obj_id) in enumerate(zip(boxes, ids)):
+            # If we already have this ID as an alias, prioritize it
+            if obj_id in self.id_aliases:
+                # Extract features for this detection
+                features = extract_features(frame, box)
+                
+                # Still calculate the score to ensure it's a reasonable match
+                x, y, w, h = box
+                center = (x, y)
+                
+                # Position similarity based on last known center
+                dist = 0
+                if self.last_known_center is not None:
+                    dist = np.sqrt((self.last_known_center[0] - x)**2 + (self.last_known_center[1] - y)**2)
+                pos_score = max(0, 1 - dist / 300)  # Normalize distance
+                
+                # Size similarity
+                size_score = 0
+                if self.last_size is not None:
+                    w_last, h_last = self.last_size
+                    size_diff = abs(w/w_last - 1) + abs(h/h_last - 1)
+                    size_score = max(0, 1 - size_diff / 1.0)
+                
+                # Appearance similarity
+                appear_score = compare_features(self.reference_features, features)
+                
+                # Combined score with emphasis on appearance for aliased IDs
+                combined_score = (0.2 * pos_score + 
+                                  0.2 * size_score + 
+                                  0.6 * appear_score)
+                
+                # Higher minimum threshold for aliased IDs to prevent wrong matches
+                if combined_score > 0.3:
+                    return obj_id, box, combined_score
+            
             # Extract features for this detection
             features = extract_features(frame, box)
             
@@ -280,6 +318,9 @@ class RobustObjectTracker:
                     curr_w, curr_h = self.last_size
                     curr_area = curr_w * curr_h
                     
+                    # Store last known center for re-identification
+                    self.last_known_center = (curr_x, curr_y)
+                    
                     for i, box in enumerate(boxes):
                         x, y, w, h = box
                         
@@ -314,8 +355,33 @@ class RobustObjectTracker:
                         x, y, w, h = boxes[best_box_idx]
                         self.update_velocity((x, y))
                         self.last_position = (x, y)
+                        self.last_known_center = (x, y)  # Update last known center
                         self.last_size = (w, h)
                         return True, (x, y, w, h)
+                    
+                    # If no good match by overlap, try to find by proximity to last known center
+                    else:
+                        min_distance = float('inf')
+                        closest_idx = -1
+                        
+                        for i, box in enumerate(boxes):
+                            x, y, w, h = box
+                            dist = np.sqrt((curr_x - x)**2 + (curr_y - y)**2)
+                            
+                            # Consider both distance and size similarity
+                            size_ratio = (w * h) / (curr_w * curr_h)
+                            if 0.5 < size_ratio < 2.0 and dist < min_distance:  # Size can be at most 2x different
+                                min_distance = dist
+                                closest_idx = i
+                        
+                        # If we found a reasonably close object
+                        if closest_idx >= 0 and min_distance < curr_w * 2:  # Use box width as distance threshold
+                            x, y, w, h = boxes[closest_idx]
+                            self.update_velocity((x, y))
+                            self.last_position = (x, y)
+                            self.last_known_center = (x, y)  # Update last known center
+                            self.last_size = (w, h)
+                            return True, (x, y, w, h)
             
             # If we got here, no good match was found
             # Try to predict position based on velocity
@@ -344,11 +410,16 @@ class RobustObjectTracker:
             
             # Update tracker
             self.last_position = (x, y)
+            self.last_known_center = (x, y)  # Update last known center
             self.last_size = (w, h)
             self.update_velocity((x, y))
             self.last_seen = frame_count
             self.lost_frames = 0
             self.prediction_only = False
+            
+            # Add this ID to our aliases if it's not already there
+            if match_id is not None:
+                self.id_aliases.add(match_id)
             
             # Update reference features (occasional updates to adapt to appearance changes)
             if frame_count % 10 == 0:
@@ -426,22 +497,15 @@ def predict_direction(points, box_sizes, num_points=5):
         else:
             vertical_direction = "Stationary"
 
-    # Analyze 3D movement (toward/away from camera) based on changing object size
+    # Calculate depth direction based on size changes
     start_w, start_h = recent_boxes[0]
     end_w, end_h = recent_boxes[-1]
-
-    # Calculate the ratio of size change
-    size_start = start_w * start_h
+    size_start = start_w * start_h if start_w * start_h != 0 else 1
     size_end = end_w * end_h
-
-    # Avoid division by zero
-    if size_start == 0:
-        size_start = 1
-
     size_ratio = size_end / size_start
-    size_change_threshold = 0.05  # 5% change threshold
+    size_change_threshold = 0.05
 
-    # Determine if object is moving toward or away based on size change
+    # Determine depth direction based on size ratio
     if size_ratio > (1 + size_change_threshold):
         depth_direction = "Toward Camera"
     elif size_ratio < (1 - size_change_threshold):
@@ -452,36 +516,49 @@ def predict_direction(points, box_sizes, num_points=5):
     return horizontal_direction, vertical_direction, depth_direction, angle
 
 # Function to calculate speed
-def calculate_speed(points, fps, pixels_per_meter, num_points=10):
+def calculate_speed(points, fps, pixels_per_meter=100, num_points=10, calibration_factor=1.0):
     """
-    Calculate speed based on points trajectory.
+    Calculate speed of an object based on tracked points.
+    
+    Args:
+        points: List of points (x, y) tracking the object's position
+        fps: Frames per second of the video
+        pixels_per_meter: Conversion factor from pixels to meters (can be calibrated)
+        num_points: Number of recent points to use for calculation
+        calibration_factor: Adjustment factor for speed calibration
+        
+    Returns:
+        speed_kmh: Speed in kilometers per hour
+        distance_per_frame: Movement distance per frame in pixels
     """
     if len(points) < num_points:
         return None, None
 
-    # Use recent points for speed calculation
+    # Use only the most recent points for calculation
     recent_points = points[-num_points:]
-
-    # Calculate total distance in pixels
+    
+    # Calculate total distance traveled across recent points
     total_distance = 0
     for i in range(1, len(recent_points)):
         x1, y1 = recent_points[i - 1]
         x2, y2 = recent_points[i]
-        dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        total_distance += dist
-
-    # Average distance per frame
+        total_distance += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    
+    # Calculate average distance per frame
     distance_per_frame = total_distance / (len(recent_points) - 1)
-
+    
     # Convert to distance per second
     distance_per_second = distance_per_frame * fps
-
-    # Convert pixels to meters
-    distance_meters_per_second = distance_per_second / pixels_per_meter
-
+    
+    # Convert to meters per second using pixels_per_meter
+    distance_mps = distance_per_second / pixels_per_meter
+    
+    # Apply calibration factor
+    distance_mps *= calibration_factor
+    
     # Convert to km/h
-    speed_kmh = distance_meters_per_second * 3.6  # 3.6 is the conversion factor from m/s to km/h
-
+    speed_kmh = distance_mps * 3.6
+    
     return speed_kmh, distance_per_frame
 
 # Frame counter and FPS settings
@@ -1944,6 +2021,12 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
     global track_history, box_size_history, direction_history, speed_history, selected_object_id, robust_tracker
     global webcam_paused, webcam_frame_buffer, just_resumed
     
+    # Default calibration factor for speed calculation
+    calibration_factor = 1.0
+    
+    # Pixels per meter conversion - can be adjusted via API endpoint if needed
+    pixels_per_meter = 100
+    
     # Set selected object ID from parameter if provided
     if obj_id is not None:
         selected_object_id = obj_id
@@ -2055,7 +2138,7 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                         x, y, w, h = pos
                         
                         # Add to tracking history
-                        track_id = 1  # Use a fixed track ID for robust tracker
+                        track_id = robust_tracker.constant_id  # Use the constant ID
                         
                         # Update trajectory
                         track_history[track_id].append((float(x), float(y)))
@@ -2066,84 +2149,103 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                             track_history[track_id].pop(0)
                             box_size_history[track_id].pop(0)
                         
-                        # Draw bounding box and track ID
+                        # Draw bounding box and track ID with distinct color for selected object
                         x1, y1 = int(x - w/2), int(y - h/2)
                         x2, y2 = int(x + w/2), int(y + h/2)
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
                         cv2.putText(frame, f"ID:{track_id}", (x1, y1 - 10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                         
-                        # Draw trajectory line - make it more prominent
+                        # Draw trajectory line
                         if len(track_history[track_id]) > 1:
                             points = np.array(track_history[track_id], dtype=np.int32).reshape((-1, 1, 2))
                             cv2.polylines(frame, [points], False, (0, 255, 255), 2)
+                        
+                        # Calculate and display movement direction with arrow indicators
+                        if len(track_history[track_id]) > 5 and len(box_size_history[track_id]) > 5:
+                            horizontal, vertical, depth, angle = predict_direction(
+                                track_history[track_id], 
+                                box_size_history[track_id], 
+                                num_points=5
+                            )
                             
-                            # Calculate direction if we have enough history
-                            if len(track_history[track_id]) >= 5:
-                                # Use the last 5 points to calculate direction
-                                last_points = track_history[track_id][-5:]
-                                if len(last_points) >= 2:
-                                    start_x, start_y = last_points[0]
-                                    end_x, end_y = last_points[-1]
-                                    
-                                    # Calculate direction vector
-                                    dir_x = end_x - start_x
-                                    dir_y = end_y - start_y
-                                    
-                                    # Calculate direction angle in degrees
-                                    angle = math.degrees(math.atan2(dir_y, dir_x))
-                                    
-                                    # Convert to compass direction
-                                    if angle < 0:
-                                        angle += 360
-                                        
-                                    # Map angle to cardinal direction
-                                    directions = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
-                                    index = int((angle + 22.5) % 360 / 45)
-                                    cardinal = directions[index]
-                                    
-                                    # Store direction
-                                    direction_history[track_id] = cardinal
-                                    
-                                    # Calculate speed (pixels per frame)
-                                    distance = math.sqrt(dir_x**2 + dir_y**2)
-                                    frames = len(last_points) - 1
-                                    speed_px = distance / frames if frames > 0 else 0
-                                    
-                                    # Store speed
-                                    speed_history[track_id] = speed_px
-                                    
-                                    # Display direction and speed more prominently
-                                    info_text = f"Dir: {cardinal}, Speed: {speed_px:.1f}"
-                                    cv2.putText(frame, info_text, (x1, y2 + 20), 
-                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                                    
-                                    # Draw direction arrow
-                                    arrow_length = 40
-                                    arrow_end_x = int(x + dir_x * arrow_length / distance if distance > 0 else x)
-                                    arrow_end_y = int(y + dir_y * arrow_length / distance if distance > 0 else y)
-                                    cv2.arrowedLine(frame, (int(x), int(y)), (arrow_end_x, arrow_end_y), 
-                                                 (0, 255, 255), 2, tipLength=0.3)
-                    
-                # Also run YOLOv8 tracking to detect other objects
-                results = model.track(frame, persist=True, half=use_half_precision)
+                            # Store direction in history
+                            direction_history[track_id] = {
+                                'horizontal': horizontal,
+                                'vertical': vertical,
+                                'depth': depth,
+                                'angle': angle
+                            }
+                            
+                            # Calculate and display speed
+                            speed_kmh, px_per_frame = calculate_speed(
+                                track_history[track_id],
+                                30,  # Assuming 30 FPS for webcam
+                                pixels_per_meter,
+                                num_points=10,
+                                calibration_factor=calibration_factor
+                            )
+                            
+                            if speed_kmh is not None:
+                                speed_history[track_id] = {
+                                    'kmh': speed_kmh,
+                                    'px_per_frame': px_per_frame
+                                }
+                            
+                            # Draw direction arrows if not stationary
+                            if horizontal != "Stationary" or vertical != "Stationary":
+                                # Draw 2D movement direction arrow
+                                arrow_length = 40
+                                if angle is not None:
+                                    arrow_start = (int(x), int(y))
+                                    end_x = arrow_start[0] + arrow_length * math.cos(math.radians(angle))
+                                    end_y = arrow_start[1] - arrow_length * math.sin(math.radians(angle))
+                                    arrow_end = (int(end_x), int(end_y))
+                                    cv2.arrowedLine(frame, arrow_start, arrow_end, (0, 165, 255), 2, tipLength=0.3)
+                            
+                            # Draw depth direction arrow
+                            if depth != "Same Distance":
+                                center = (int(x), int(y))
+                                if depth == "Toward Camera":
+                                    # Draw arrow pointing out of screen (toward viewer)
+                                    cv2.circle(frame, center, 10, (255, 0, 255), -1)  # Filled circle
+                                    cv2.circle(frame, center, 20, (255, 0, 255), 2)   # Outer circle
+                                else:  # Away from Camera
+                                    # Draw arrow pointing into screen (away from viewer)
+                                    cv2.circle(frame, center, 20, (255, 0, 255), 2)   # Outer circle
+                                    cv2.circle(frame, center, 5, (255, 0, 255), -1)   # Small inner circle
+                        
+                        # Display direction and speed text
+                        info_y = y2 + 20
+                        
+                        if track_id in direction_history:
+                            dirs = direction_history[track_id]
+                            dir_text = f"Dir: {dirs['horizontal']}"
+                            if dirs['depth'] != "Same Distance":
+                                dir_text += f" | {dirs['depth']}"
+                            cv2.putText(frame, dir_text, (x1, info_y), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+                            info_y += 20
+                        
+                        if track_id in speed_history:
+                            speed = speed_history[track_id]['kmh']
+                            cv2.putText(frame, f"Speed: {speed:.1f} km/h", (x1, info_y), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+                
+                # Run YOLOv8 detection for other objects in the scene
+                results = model.predict(frame, half=use_half_precision)
             else:
+                # Just run basic detection if tracking is disabled
                 results = model.predict(frame, half=use_half_precision)
                 
-            # Process results for visualization
-            # Get bounding boxes, classes and tracking IDs
+            # Process and display YOLOv8 detection results
             if hasattr(results[0], 'boxes'):
-                # Process boxes - unified format across detection and tracking
+                # Get all boxes
                 boxes = results[0].boxes.xywh.cpu().numpy()  # center_x, center_y, width, height
                 classes = results[0].boxes.cls.cpu().numpy()
                 confidences = results[0].boxes.conf.cpu().numpy()
                 
-                # Check if tracking IDs are available
-                track_ids = None
-                if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None:
-                    track_ids = results[0].boxes.id.cpu().numpy()
-                    
-                # Draw boxes and tracking information
+                # Process all detections
                 for i, box in enumerate(boxes):
                     x, y, w, h = box
                     cls = int(classes[i])
@@ -2151,9 +2253,7 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                     
                     # Skip this box if we're already tracking with the robust tracker
                     if robust_tracker is not None and selected_object_id is not None:
-                        # If the robust tracker is active, skip YOLOv8 visualization for this object
-                        # to avoid double drawing
-                        # Simple IOU check to avoid duplicate boxes
+                        # Check if this detection is likely the same as our tracked object
                         x1, y1 = int(x - w/2), int(y - h/2)
                         x2, y2 = int(x + w/2), int(y + h/2)
                         rob_x, rob_y, rob_w, rob_h = robust_tracker.get_position()
@@ -2174,106 +2274,56 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
                             union = box_area + rob_area - intersection
                             iou = intersection / union if union > 0 else 0
                             
-                            if iou > 0.5:
+                            if iou > 0.3:
                                 # Skip this box - it's likely the same object
                                 continue
                     
-                    # Draw bounding box
+                    # For all other objects, draw with less prominence (thinner lines)
                     x1, y1 = int(x - w/2), int(y - h/2)
                     x2, y2 = int(x + w/2), int(y + h/2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
                     
-                    # Calculate color based on class
-                    color = (0, 255, 0)  # Default green
+                    # If tracking is disabled or we don't have a selected object, show all object IDs
+                    if not tracking_enabled or selected_object_id is None:
+                        # Generate a random but consistent ID for this detection
+                        detection_id = hash(f"{x1}_{y1}_{x2}_{y2}") % 1000
+                        cv2.putText(frame, f"ID:{detection_id}", (x1, y1 - 10), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            # Add tracking window to the frame
+            if tracking_enabled and selected_object_id is not None:
+                cv2.putText(frame, "TRACKING ACTIVE", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                
+                # Get colors for reliable identification across frames
+                tracking_info = []
+                
+                # Add info for currently tracked object
+                if robust_tracker is not None:
+                    tracking_info.append(f"Tracking Object ID: {robust_tracker.constant_id}")
                     
-                    # If we have a track ID, use it for coloring and tracking
-                    if track_ids is not None:
-                        track_id = int(track_ids[i])
-                        
-                        # Generate consistent color for this ID
-                        color_r = (track_id * 5) % 255
-                        color_g = (track_id * 10) % 255
-                        color_b = (track_id * 20) % 255
-                        color = (color_b, color_g, color_r)
-                        
-                        # Draw ID on the box
-                        cv2.putText(frame, f"ID:{track_id}", (x1, y1 - 10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                        
-                        # If this is the specific object we're tracking, highlight it
-                        if selected_object_id is not None and track_id == selected_object_id and robust_tracker is None:
-                            # Highlight selected object
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
-                            
-                            # Draw trajectory
-                            track_history[track_id].append((float(x), float(y)))
-                            box_size_history[track_id].append((float(w), float(h)))
-                            
-                            # Limit trajectory history
-                            if len(track_history[track_id]) > 90:  # Keep more points for webcam mode
-                                track_history[track_id].pop(0)
-                                box_size_history[track_id].pop(0)
-                                
-                            # Draw trajectory line
-                            points = np.array(track_history[track_id], dtype=np.int32).reshape((-1, 1, 2))
-                            cv2.polylines(frame, [points], False, (0, 255, 255), 2)
-                            
-                            # Calculate direction if we have enough history
-                            if len(track_history[track_id]) >= 5:
-                                # Use the last 5 points to calculate direction
-                                last_points = track_history[track_id][-5:]
-                                if len(last_points) >= 2:
-                                    start_x, start_y = last_points[0]
-                                    end_x, end_y = last_points[-1]
-                                    
-                                    # Calculate direction vector
-                                    dir_x = end_x - start_x
-                                    dir_y = end_y - start_y
-                                    
-                                    # Calculate direction angle in degrees
-                                    angle = math.degrees(math.atan2(dir_y, dir_x))
-                                    
-                                    # Convert to compass direction
-                                    if angle < 0:
-                                        angle += 360
-                                        
-                                    # Map angle to cardinal direction
-                                    directions = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
-                                    index = int((angle + 22.5) % 360 / 45)
-                                    cardinal = directions[index]
-                                    
-                                    # Store direction
-                                    direction_history[track_id] = cardinal
-                                    
-                                    # Calculate speed (pixels per frame)
-                                    distance = math.sqrt(dir_x**2 + dir_y**2)
-                                    frames = len(last_points) - 1
-                                    speed_px = distance / frames if frames > 0 else 0
-                                    
-                                    # Store speed
-                                    speed_history[track_id] = speed_px
-                                    
-                                    # Display direction and speed
-                                    info_text = f"Dir: {cardinal}, Speed: {speed_px:.1f}"
-                                    cv2.putText(frame, info_text, (x1, y2 + 20), 
-                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                                    
-                                    # Draw direction arrow
-                                    arrow_length = 40
-                                    arrow_end_x = int(x + dir_x * arrow_length / distance if distance > 0 else x)
-                                    arrow_end_y = int(y + dir_y * arrow_length / distance if distance > 0 else y)
-                                    cv2.arrowedLine(frame, (int(x), int(y)), (arrow_end_x, arrow_end_y), 
-                                                 (0, 255, 255), 2, tipLength=0.3)
-                        else:
-                            # Regular box for other tracked objects
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    else:
-                        # Just draw regular detection boxes
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        
-                        # Display class and confidence
-                        label = f"Class:{cls}"
-                        cv2.putText(frame, label, (x1, y1 - 10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    # Add state information
+                    tracking_info.append(f"State: {robust_tracker.state}")
+                    
+                    # Get position and show as tracking info
+                    x, y, w, h = robust_tracker.get_position()
+                    tracking_info.append(f"Pos: ({int(x)}, {int(y)})")
+                    
+                    # Add direction from history if available
+                    track_id = robust_tracker.constant_id
+                    if track_id in direction_history:
+                        dirs = direction_history[track_id]
+                        tracking_info.append(f"Dir: {dirs['horizontal']} | {dirs['vertical']} | {dirs['depth']}")
+                    
+                    # Add speed info if available
+                    if track_id in speed_history:
+                        speed = speed_history[track_id]['kmh']
+                        tracking_info.append(f"Speed: {speed:.1f} km/h")
+                
+                # Display tracking info in top-left corner
+                info_y = 120
+                for info in tracking_info:
+                    cv2.putText(frame, info, (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+                    info_y += 25
             
             # Calculate FPS
             frame_time = time.time() - frame_start_time
@@ -2287,7 +2337,10 @@ def process_webcam_stream(use_tracking: bool = True, obj_id: Optional[int] = Non
             # Add processing mode and FPS to the frame
             mode_text = "Tracking" if tracking_enabled else "Detection"
             if selected_object_id is not None:
-                mode_text += f" (Tracking ID: {selected_object_id})"
+                if robust_tracker is not None:
+                    mode_text += f" (Object ID: {robust_tracker.constant_id})"
+                else:
+                    mode_text += f" (Object ID: {selected_object_id})"
                 
             cv2.putText(frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.putText(frame, fps_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
