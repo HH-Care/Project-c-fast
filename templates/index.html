@@ -988,13 +988,13 @@
                 const videoElem = document.getElementById('videoFeed');
                 
                 if (isPlaying) {
+                    // RESUME WEBCAM
                     console.log("Resuming webcam");
                     
-                    // Handle browser camera specifically
-                    if (window.frameCapture) {
-                        // Pause frame capture for browser camera
-                        clearInterval(window.frameCapture);
-                        window.frameCapture = null;
+                    // For browser camera, restart frame capture
+                    if (window.browserStream) {
+                        console.log("Restarting browser camera frame capture");
+                        startBrowserFrameCapture();
                     }
                     
                     // Call the resume endpoint
@@ -1014,11 +1014,13 @@
                         document.getElementById('videoStatus').textContent = 'Error resuming webcam';
                     });
                 } else {
+                    // PAUSE WEBCAM
                     console.log("Pausing webcam");
                     
                     // Handle browser camera specifically
                     if (window.frameCapture) {
                         // Pause frame capture for browser camera
+                        console.log("Stopping browser camera frame capture");
                         clearInterval(window.frameCapture);
                         window.frameCapture = null;
                     }
