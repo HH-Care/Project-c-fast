@@ -57,43 +57,70 @@ just_resumed = False  # Flag to indicate webcam just resumed from pause
 STD_WIDTH = 1280
 STD_HEIGHT = 720
 
+# Available models configuration
+AVAILABLE_MODELS = {
+    "boat": {
+        "path": "models/final_model.pt",
+        "name": "Boat Detection Model",
+        "description": "Detects boats in videos or camera feeds"
+    },
+    "ball": {
+        "path": "models/ball_best.pt",
+        "name": "Ball Detection Model",
+        "description": "Detects balls in videos or camera feeds"
+    }
+}
+
+# Default model
+CURRENT_MODEL = "boat"
+
 class BoundingBox(BaseModel):
     x: float
     y: float
     width: float
     height: float
 
-# Load the YOLO model
-try:
-    MODEL_PATH = "models/final_model.pt"  # Direct PyTorch model
-    YOLO_FALLBACK_PATH = "yolov8n.pt" # Ultralytics usually handles caching this
+def load_model(model_path):
+    """Load a YOLO model from the specified path"""
+    global model, device, use_half_precision
+    
+    try:
+        print(f"Loading model from: {model_path}")
+        
+        # Load PyTorch model directly
+        model = YOLO(model_path, task='detect')
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Set half precision flag based on device
+        use_half_precision = torch.cuda.is_available()  # Only use half precision on GPU
+        
+        # Move model to GPU for PyTorch models
+        model.to(device)
+        print(f"Model loaded successfully on {device}")
+        
+        # Warm up the model with a dummy frame
+        print(f"Warming up model on {device}...")
+        dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        _ = model.predict(dummy_frame, half=use_half_precision)  # Use half precision only on GPU
+        print(f"Model warmed up successfully ({'' if use_half_precision else 'not '}using half precision)")
+        
+        return True
+    except Exception as e:
+        print(f"Critical error loading model: {e}")
+        print("Using basic YOLO model as fallback")
+        try:
+            model = YOLO("yolov8n.pt")  # Use a standard model as fallback
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            use_half_precision = torch.cuda.is_available()  # Only use half precision on GPU
+            model.to(device)  # This works for PyTorch models
+            return True
+        except Exception as fallback_error:
+            print(f"Failed to load fallback model: {fallback_error}")
+            return False
 
-    print(f"Attempting to load PyTorch model from: {MODEL_PATH}")
-    
-    # Load PyTorch model directly
-    model = YOLO(MODEL_PATH, task='detect')
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # Set half precision flag based on device
-    use_half_precision = torch.cuda.is_available()  # Only use half precision on GPU
-    
-    # Move model to GPU for PyTorch models
-    model.to(device)
-    print(f"PyTorch model loaded successfully on {device}")
-    
-    # Warm up the model with a dummy frame
-    print(f"Warming up model on {device}...")
-    dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-    _ = model.predict(dummy_frame, half=use_half_precision)  # Use half precision only on GPU
-    print(f"Model warmed up successfully ({'' if use_half_precision else 'not '}using half precision)")
-
-except Exception as e:
-    print(f"Critical error loading model: {e}")
-    print("Using basic YOLO model as fallback")
-    model = YOLO("yolov8n.pt")  # Use a standard model as fallback
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    use_half_precision = torch.cuda.is_available()  # Only use half precision on GPU
-    model.to(device)  # This works for PyTorch models
+# Initialize model on startup
+if "model" not in globals():
+    load_model(AVAILABLE_MODELS[CURRENT_MODEL]["path"])
 
 # Store the track history
 track_history = defaultdict(list)
@@ -2715,6 +2742,53 @@ async def clear_data_get():
     """GET method to clear all data (for direct browser access)"""
     # Delegate to the POST method implementation
     return await clear_data()
+
+@app.get("/available_models")
+async def get_available_models():
+    """Get information about available models"""
+    models_info = []
+    
+    for model_id, model_data in AVAILABLE_MODELS.items():
+        models_info.append({
+            "id": model_id,
+            "name": model_data["name"],
+            "description": model_data["description"],
+            "active": model_id == CURRENT_MODEL
+        })
+    
+    return {"success": True, "models": models_info}
+
+@app.post("/switch_model")
+async def switch_model(model_id: str = Form(...)):
+    """Switch the active detection model"""
+    global CURRENT_MODEL
+    
+    # Check if model exists in available models
+    if model_id not in AVAILABLE_MODELS:
+        return {"success": False, "error": f"Unknown model: {model_id}"}
+    
+    # Get model info
+    model_name = AVAILABLE_MODELS[model_id]["name"]
+    
+    # Don't reload if it's already the current model
+    if model_id == CURRENT_MODEL:
+        return {"success": True, "message": f"{model_name}", "already_active": True}
+    
+    # Get model path
+    model_path = AVAILABLE_MODELS[model_id]["path"]
+    
+    # Reset tracking data before switching model
+    reset_tracking_data()
+    
+    # Load new model
+    success = load_model(model_path)
+    
+    if success:
+        # Update current model
+        CURRENT_MODEL = model_id
+        return {"success": True, "message": f"{model_name}", "already_active": False}
+    else:
+        return {"success": False, "error": "Failed to load model"}
 
 if __name__ == "__main__":
     # Run the app on all network interfaces on port 8000

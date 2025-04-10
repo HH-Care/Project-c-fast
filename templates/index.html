@@ -148,24 +148,55 @@
 
         /* Camera status indicator */
         .camera-indicator {
-            display: inline-block;
             width: 12px;
             height: 12px;
             border-radius: 50%;
+            background-color: #777; /* Gray for initial state */
             margin-right: 8px;
-            background-color: #555;
+            display: inline-block;
         }
 
-        .camera-indicator.active {
-            background-color: var(--accent-green);
-            box-shadow: 0 0 8px var(--accent-green);
+        .camera-indicator.connected {
+            background-color: #4CAF50; /* Green for connected */
+        }
+
+        .camera-indicator.disconnected {
+            background-color: #F44336; /* Red for disconnected */
+        }
+
+        /* Model selection styles */
+        .model-status {
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+        }
+
+        .model-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: #777; /* Gray for initial state */
+            margin-right: 8px;
+            display: inline-block;
+        }
+
+        .model-indicator.connected {
+            background-color: #4CAF50; /* Green for connected */
+        }
+
+        .model-indicator.loading {
+            background-color: #FFC107; /* Yellow for loading */
             animation: pulse 1.5s infinite;
         }
 
+        .model-indicator.error {
+            background-color: #F44336; /* Red for error */
+        }
+
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+            0% { opacity: 0.5; }
+            50% { opacity: 1; }
+            100% { opacity: 0.5; }
         }
 
         .video-container {
@@ -463,6 +494,28 @@
                 <p>Advanced AI-Powered Detection System</p>
             </div>
 
+            <!-- Model Selection - FIRST SECTION -->
+            <div class="section">
+                <div class="section-title">Detection Model</div>
+                <div class="form-group">
+                    <label for="modelSelect">Select Detection Model</label>
+                    <select id="modelSelect" class="select-input" onchange="switchModel(this.value)">
+                        <option value="boat">Loading models...</option>
+                    </select>
+                </div>
+                
+                <!-- Status indicator similar to camera indicator -->
+                <div class="form-group">
+                    <div class="model-status">
+                        <span class="model-indicator" id="modelIndicator"></span>
+                        Model Status: <span id="modelStatusText">Connecting...</span>
+                    </div>
+                    <div id="modelStatus" class="status"></div>
+                    <div class="help-text">Choose the appropriate model for your detection task</div>
+                </div>
+            </div>
+
+            <!-- Video Source Section (SECOND SECTION) -->
             <div class="section">
                 <div class="section-title">Video Source</div>
                 <div class="tabs">
@@ -580,7 +633,125 @@
         const drawCanvas = document.getElementById('drawCanvas');
         const confirmBtn = document.getElementById('confirmDrawBtn');
         const cancelBtn = document.getElementById('cancelDrawBtn');
-        const ctx = drawCanvas.getContext('2d');
+        const canvasContext = drawCanvas.getContext('2d');
+        
+        // Initialize model status
+        updateModelStatus('Connecting...', false);
+
+        // Update model status in UI
+        function updateModelStatus(status, isConnected) {
+            const indicator = document.getElementById('modelIndicator');
+            const statusText = document.getElementById('modelStatusText');
+            
+            // Clear existing classes
+            indicator.className = 'model-indicator';
+            
+            if (status === 'Loading...') {
+                indicator.classList.add('loading');
+            } else if (isConnected) {
+                indicator.classList.add('connected');
+            } else {
+                indicator.classList.add('error');
+            }
+            
+            statusText.textContent = status;
+        }
+
+        // Load available models from server
+        async function loadAvailableModels() {
+            try {
+                updateModelStatus('Loading...', false);
+                
+                const response = await fetch('/available_models');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const modelSelect = document.getElementById('modelSelect');
+                    
+                    // Clear existing options
+                    modelSelect.innerHTML = '';
+                    
+                    // Add options for each model
+                    data.models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.id;
+                        option.text = model.name;
+                        option.selected = model.active;
+                        modelSelect.appendChild(option);
+                    });
+                    
+                    console.log("Loaded available models");
+                    
+                    // Update status to connected
+                    updateModelStatus('Connected', true);
+                } else {
+                    console.error("Failed to load models:", data.error);
+                    updateModelStatus('Error loading models', false);
+                }
+            } catch (error) {
+                console.error("Error loading models:", error);
+                updateModelStatus('Connection failed', false);
+            }
+        }
+
+        // Enhanced model switching function with loading status
+        async function switchModel(modelId) {
+            try {
+                // Show loading status
+                updateModelStatus('Loading...', false);
+                document.getElementById('modelStatus').textContent = 'Switching model...';
+                
+                // Create form data
+                const formData = new FormData();
+                formData.append('model_id', modelId);
+                
+                // Call the API
+                const response = await fetch('/switch_model', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Update to connected status
+                    updateModelStatus('Connected', true);
+                    document.getElementById('modelStatus').textContent = data.message;
+                    document.getElementById('modelStatus').className = 'status success';
+                    
+                    // Restart video processing if active
+                    if (currentVideo) {
+                        // If webcam is active, restart it
+                        if (currentVideo === 'webcam' && isPlaying) {
+                            // Restart webcam stream
+                            if (window.browserStream) {
+                                startBrowserFrameCapture();
+                            }
+                            // Update stream URL with new parameters
+                            const trackingEnabled = getTrackingEnabled();
+                            const webcamUrl = `/webcam_feed?tracking=${trackingEnabled}${selectedObjectId ? `&object_id=${selectedObjectId}` : ''}`;
+                            document.getElementById('videoFeed').src = webcamUrl;
+                        } else if (isPlaying) {
+                            // Restart video stream
+                            startVideoStream();
+                        }
+                    }
+                    
+                    // Update video status
+                    document.getElementById('videoStatus').textContent = `Model switched to ${data.message}`;
+                } else {
+                    // Update to error status
+                    updateModelStatus('Failed', false);
+                    document.getElementById('modelStatus').textContent = `Error: ${data.error}`;
+                    document.getElementById('modelStatus').className = 'status error';
+                }
+            } catch (error) {
+                // Update to error status
+                updateModelStatus('Error', false);
+                document.getElementById('modelStatus').textContent = `Error: ${error}`;
+                document.getElementById('modelStatus').className = 'status error';
+            }
+        }
 
         function initializeCanvas() {
             drawCanvas.width = videoFeed.offsetWidth;
@@ -616,10 +787,10 @@
             currentRect.width = currentX - startX;
             currentRect.height = currentY - startY;
 
-            ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-            ctx.strokeStyle = '#00ff00';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(currentRect.x, currentRect.y, currentRect.width, currentRect.height);
+            canvasContext.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+            canvasContext.strokeStyle = '#00ff00';
+            canvasContext.lineWidth = 2;
+            canvasContext.strokeRect(currentRect.x, currentRect.y, currentRect.width, currentRect.height);
         }
 
         function endDrawing() {
@@ -631,7 +802,7 @@
         }
 
         function clearDrawing() {
-            ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+            canvasContext.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
             currentRect = null;
             confirmBtn.classList.remove('active');
         }
@@ -647,7 +818,6 @@
             isDrawingMode = !isDrawingMode;
             const videoSection = document.querySelector('.video-section');
             const drawModeBtn = document.getElementById('drawModeBtn');
-            const drawCanvas = document.getElementById('drawCanvas');
             const drawingControls = document.querySelector('.drawing-controls');
             
             console.log("Drawing mode toggled:", isDrawingMode);
@@ -792,8 +962,7 @@
             
             // Clear canvas
             if (drawCanvas) {
-                const ctx = drawCanvas.getContext('2d');
-                ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+                canvasContext.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
             }
             
             // Reset any active drawing mode
@@ -952,7 +1121,6 @@
             const videoElem = document.getElementById('videoFeed');
             videoElem.src = '';
             videoElem.classList.remove('active');
-            document.getElementById('placeholder').style.display = 'block';
             
             // Reset tracking and selected object
             selectedObjectId = null;
@@ -1123,6 +1291,9 @@
 
         // Update control buttons on page load
         document.addEventListener('DOMContentLoaded', function() {
+            // Load available models
+            loadAvailableModels();
+            
             // Check browser compatibility
             checkBrowserCompatibility();
             
@@ -1250,9 +1421,9 @@
             const statusText = document.getElementById('cameraStatusText');
             
             if (isActive) {
-                indicator.classList.add('active');
+                indicator.classList.add('connected');
             } else {
-                indicator.classList.remove('active');
+                indicator.classList.remove('connected');
             }
             
             statusText.textContent = status;
@@ -1648,9 +1819,12 @@
 
         // Function to capture and send frames from browser camera to server
         function startBrowserFrameCapture() {
+            console.log("Starting browser frame capture");
+            
             // Clear any existing interval
             if (window.frameCapture) {
                 clearInterval(window.frameCapture);
+                window.frameCapture = null;
             }
             
             // Create canvas for frame capture if it doesn't exist
