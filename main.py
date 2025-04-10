@@ -65,7 +65,7 @@ class BoundingBox(BaseModel):
 
 # Load the YOLO model
 try:
-    MODEL_PATH = "best_openvino_model/"# Use resolved path
+    MODEL_PATH = "final_model_openvino_model/"# Use resolved path
     YOLO_FALLBACK_PATH = "yolov8n.pt" # Ultralytics usually handles caching this
 
     print(f"Attempting to load model from: {MODEL_PATH}")
@@ -1419,11 +1419,14 @@ async def startup_event():
         print(f"Current GPU Memory Usage: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
         print(f"GPU Memory Cached: {torch.cuda.memory_reserved(0) / 1e9:.2f} GB")
         
-        # Verify model is on GPU
-        if hasattr(model, 'model'):
-            print(f"Model Device: {next(model.model.parameters()).device}")
-        else:
-            print("Warning: Could not determine model device")
+        # Verify model is on GPU - safely handle both PyTorch and OpenVINO models
+        try:
+            if hasattr(model, 'model') and hasattr(model.model, 'parameters'):
+                print(f"Model Device: {next(model.model.parameters()).device}")
+            else:
+                print(f"Model Device: {device} (OpenVINO model)")
+        except (AttributeError, TypeError):
+            print(f"Model Device: {device} (OpenVINO model)")
     else:
         print("CUDA Available: No (Running in CPU mode - performance will be limited)")
         print("Warning: Model is running on CPU, which will be significantly slower")

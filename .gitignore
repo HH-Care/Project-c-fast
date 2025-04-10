@@ -1,1 +1,5 @@
 venv
+ec2_gpu_setup_g5_amazon_linux.md
+ec2_gpu_setup_preconfigured.md
+ec2_gpu_setup.md
+kernel.errors.txt
